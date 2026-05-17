@@ -195,7 +195,43 @@ async def send_test_task(db: Session = Depends(get_db)):
     )
 
 
-@app.get("/tasks", response_model=List[TaskOut], summary="List all tasks")
+@app.get("/tasks", response_model=List[TaskOut], summary="List all tasks (newest first)")
 def list_tasks(db: Session = Depends(get_db)):
     tasks = db.query(Task).order_by(Task.created_at.desc()).all()
     return tasks
+
+
+@app.post("/tasks/clear-test", summary="Delete all test tasks for Sunset Villa")
+def clear_test_tasks(db: Session = Depends(get_db)):
+    deleted = (
+        db.query(Task)
+        .filter(Task.property_name == "Sunset Villa")
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    logger.info("Cleared %d test task(s) for Sunset Villa", deleted)
+    return {"deleted": deleted, "message": f"Deleted {deleted} test task(s) with property_name='Sunset Villa'"}
+
+
+@app.post("/tasks/{task_id}/close", response_model=TaskOut, summary="Mark a task as closed/cancelled")
+def close_task(task_id: int, db: Session = Depends(get_db)):
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    task.status = "closed"
+    task.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(task)
+    logger.info("Task %d marked as closed", task_id)
+    return task
+
+
+@app.delete("/tasks/{task_id}", summary="Delete a task by ID")
+def delete_task(task_id: int, db: Session = Depends(get_db)):
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    db.delete(task)
+    db.commit()
+    logger.info("Task %d deleted", task_id)
+    return {"deleted": task_id, "message": f"Task {task_id} deleted"}

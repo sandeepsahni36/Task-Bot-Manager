@@ -94,7 +94,26 @@ Creates a test task in SQLite and sends a WhatsApp template message to `TEST_WHA
 ---
 
 ### `GET /tasks`
-Returns all tasks with their current status.
+Returns all tasks with their current status, newest first.
+
+---
+
+### `POST /tasks/{task_id}/close`
+Marks a task as `closed`/cancelled. Useful for cancelling a task without deleting it.
+
+---
+
+### `DELETE /tasks/{task_id}`
+Permanently deletes a single task by ID.
+
+---
+
+### `POST /tasks/clear-test`
+Deletes all tasks where `property_name = "Sunset Villa"`. Use this to wipe test data created by `/send-test-task` without touching real tasks.
+
+```bash
+curl -X POST https://<your-repl-domain>/tasks/clear-test
+```
 
 ---
 
