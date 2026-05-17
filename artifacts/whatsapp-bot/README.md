@@ -117,6 +117,33 @@ curl -X POST https://<your-repl-domain>/tasks/clear-test
 
 ---
 
+## Hostfully Integration
+
+### Setup
+
+Add these three secrets in **Tools → Secrets**:
+
+| Secret | Value |
+|---|---|
+| `HOSTFULLY_API_KEY` | Your Hostfully API key |
+| `HOSTFULLY_AGENCY_UID` | Your agency UID from Hostfully |
+| `HOSTFULLY_BASE_URL` | API base URL (e.g. `https://api.hostfully.com/v2`) |
+
+### Endpoints
+
+**`GET /hostfully/test`**
+Quick connectivity check. Returns `success: true/false`, the HTTP status code from Hostfully, and the first 3 property names if the connection succeeds.
+
+**`GET /hostfully/properties`**
+Returns all properties with UID, name, address, city, and active/status fields.
+
+**`GET /hostfully/guests`**
+Returns the first 10 guests with UID, name, email, and phone.
+
+> The API key is never returned in any response — it is only sent as a request header to Hostfully.
+
+---
+
 ## WhatsApp Template Setup
 
 Before using `/send-test-task`, you must create and get approved a template named `hello_world` in [Meta Business Manager](https://business.facebook.com/) → **Account Tools → Message Templates**.

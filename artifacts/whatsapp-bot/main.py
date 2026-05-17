@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from database import init_db, get_db, Task, WhatsAppMessage, Staff
 from schemas import TaskOut, WhatsAppMessageOut, SendTestTaskResponse
 from whatsapp import send_template_message
+from hostfully import get_hostfully_config, fetch_properties, fetch_guests
 
 logging.basicConfig(
     level=logging.INFO,
@@ -235,3 +236,93 @@ def delete_task(task_id: int, db: Session = Depends(get_db)):
     db.commit()
     logger.info("Task %d deleted", task_id)
     return {"deleted": task_id, "message": f"Task {task_id} deleted"}
+
+
+# ---------------------------------------------------------------------------
+# Hostfully endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/hostfully/test", summary="Test Hostfully API connectivity")
+async def hostfully_test():
+    try:
+        api_key, agency_uid, base_url = get_hostfully_config()
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    status_code, data = await fetch_properties(api_key, agency_uid, base_url)
+    success = status_code == 200
+
+    property_names = []
+    if success:
+        items = data if isinstance(data, list) else data.get("properties", data.get("results", []))
+        for p in items[:3]:
+            name = p.get("name") or p.get("title") or p.get("propertyName")
+            if name:
+                property_names.append(name)
+
+    logger.info("Hostfully connectivity test: status=%d success=%s", status_code, success)
+    return {
+        "success": success,
+        "status_code": status_code,
+        "first_3_properties": property_names,
+    }
+
+
+@app.get("/hostfully/properties", summary="List all Hostfully properties")
+async def hostfully_properties():
+    try:
+        api_key, agency_uid, base_url = get_hostfully_config()
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    status_code, data = await fetch_properties(api_key, agency_uid, base_url)
+    if status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Hostfully API returned {status_code}: {data}",
+        )
+
+    items = data if isinstance(data, list) else data.get("properties", data.get("results", []))
+
+    results = []
+    for p in items:
+        results.append({
+            "uid": p.get("uid") or p.get("id"),
+            "name": p.get("name") or p.get("title") or p.get("propertyName"),
+            "address": p.get("address") or p.get("addressLine1"),
+            "city": p.get("city"),
+            "active": p.get("active") or p.get("status"),
+        })
+
+    logger.info("Hostfully properties fetched: %d properties", len(results))
+    return {"count": len(results), "properties": results}
+
+
+@app.get("/hostfully/guests", summary="List first 10 Hostfully guests")
+async def hostfully_guests():
+    try:
+        api_key, agency_uid, base_url = get_hostfully_config()
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    status_code, data = await fetch_guests(api_key, agency_uid, base_url)
+    if status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Hostfully API returned {status_code}: {data}",
+        )
+
+    items = data if isinstance(data, list) else data.get("guests", data.get("results", []))
+
+    results = []
+    for g in items[:10]:
+        results.append({
+            "uid": g.get("uid") or g.get("id"),
+            "firstName": g.get("firstName") or g.get("first_name"),
+            "lastName": g.get("lastName") or g.get("last_name"),
+            "email": g.get("email"),
+            "phone": g.get("phoneNumber") or g.get("phone"),
+        })
+
+    logger.info("Hostfully guests fetched: returning %d of %d", len(results), len(items))
+    return {"count": len(results), "guests": results}
