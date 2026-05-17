@@ -117,6 +117,74 @@ curl -X POST https://<your-repl-domain>/tasks/clear-test
 
 ---
 
+## Damage Case Workflow
+
+### Overview
+
+Operations discovers damage in a unit → GM is chased for a quote → Reservations shares charges with tenant → Tenant approves → GM purchases and places replacement → Photo proof required → Accounts processes refund → Case closed.
+
+### Statuses
+
+| Status | Meaning |
+|---|---|
+| `quote_pending` | Waiting on GM to provide damage quote |
+| `tenant_approval_pending` | Waiting on Reservations/Ops to confirm tenant approved |
+| `gm_action_pending` | Tenant approved — GM + Ops must purchase and place item |
+| `placement_proof_pending` | Waiting on GM to send photo proof of placement |
+| `accounts_refund_pending` | Waiting on Accounts to process refund |
+| `closed` | Refund complete |
+| `cancelled` | Case cancelled |
+
+### Endpoints
+
+**`POST /damage-cases`** — Create a new damage case. Required fields: `unit_name` or `hostfully_property_uid`, `guest_name`, `damage_description`, `deposit_amount`, `gm_number`, `ops_supervisor_number`, `reservations_number`, `accounts_number`. On creation, a WhatsApp message is sent to the GM asking for a quote.
+
+```json
+{
+  "unit_name": "Sunset Villa",
+  "guest_name": "John Smith",
+  "guest_phone": "971501234567",
+  "damage_description": "Broken TV in master bedroom",
+  "deposit_amount": 2000,
+  "gm_number": "971501234567",
+  "ops_supervisor_number": "971507654321",
+  "reservations_number": "971509876543",
+  "accounts_number": "971502345678"
+}
+```
+
+**`GET /damage-cases`** — All cases, newest first.
+
+**`GET /damage-cases/pending`** — Only non-closed, non-cancelled cases.
+
+**`GET /damage-cases/{id}`** — Single case with full event log and photos.
+
+**`POST /damage-cases/{id}/quote`** — Submit damage quote. Calculates `refund = deposit - damage - other_charges`. Notifies Reservations.
+```json
+{ "damage_amount": 500, "other_charges": 100, "notes": "TV replacement" }
+```
+
+**`POST /damage-cases/{id}/tenant-approved`** — Tenant agreed to charges. Notifies GM and Ops Supervisor.
+
+**`POST /damage-cases/{id}/gm-purchased`** — GM confirms item purchased. Asks GM for photo proof.
+
+**`POST /damage-cases/{id}/photo`** — Upload photo proof (URL or WhatsApp media ID).
+```json
+{ "photo_url_or_media_id": "https://...", "photo_type": "placement_proof" }
+```
+
+**`POST /damage-cases/{id}/replacement-placed`** — Confirm item placed. Requires photo proof. Notifies Accounts with full financial summary.
+
+**`POST /damage-cases/{id}/refund-completed`** — Close case after refund is done.
+
+**`POST /damage-cases/{id}/cancel`** — Cancel the case.
+
+**`GET /owner-summary`** — JSON summary: total pending, overdue, broken down by waiting_on, missing photos, closed today, top 10 oldest open cases.
+
+**`GET /dashboard-view`** — HTML dashboard grouped by status with all case details. Open directly in a browser.
+
+---
+
 ## Hostfully Integration
 
 ### Setup

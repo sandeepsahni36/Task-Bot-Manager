@@ -1,0 +1,175 @@
+Add the Damage Case workflow now that Hostfully and WhatsApp are both working.
+
+Business workflow:
+This is for a holiday homes company.
+Operations discovers damages in a unit. The existing WhatsApp group is only for damage discovery.
+The bot will message responsible people privately.
+GM personally purchases and places replacement items.
+After tenant approval, both GM and the operations supervisor should be chased.
+Accounts should refund full deposit minus damage charges and other charges such as late checkout or lost access card.
+Photo proof is required before accounts is told to refund.
+Owner needs a dashboard to track pending cases.
+
+Use existing Hostfully integration:
+- Store hostfully_property_uid when creating a damage case.
+- Allow selecting/entering property from Hostfully property list.
+- Store hostfully_guest_uid when available.
+- Guest info can be manually entered if Hostfully guest is not selected.
+
+Add database tables:
+
+damage_cases:
+id
+hostfully_property_uid
+hostfully_guest_uid
+unit_name
+guest_name
+guest_phone
+guest_email
+damage_description
+deposit_amount
+damage_amount
+other_charges
+refund_amount
+status
+waiting_on
+reported_by_number
+gm_number
+ops_supervisor_number
+reservations_number
+accounts_number
+photo_proof_received
+created_at
+updated_at
+due_at
+closed_at
+
+damage_events:
+id
+damage_case_id
+event_type
+message
+whatsapp_number
+created_at
+
+damage_photos:
+id
+damage_case_id
+photo_url_or_media_id
+photo_type
+created_at
+
+Statuses:
+quote_pending
+tenant_approval_pending
+gm_action_pending
+placement_proof_pending
+accounts_refund_pending
+closed
+cancelled
+
+Add endpoints:
+
+POST /damage-cases
+Create a damage case.
+Required fields:
+- unit_name or hostfully_property_uid
+- guest_name
+- damage_description
+- deposit_amount
+- gm_number
+- ops_supervisor_number
+- reservations_number
+- accounts_number
+
+Set:
+status = quote_pending
+waiting_on = GM
+photo_proof_received = false
+
+Send WhatsApp message to GM asking for a damage quote.
+
+GET /damage-cases
+Return all cases newest first.
+
+GET /damage-cases/pending
+Return cases where status is not closed and not cancelled.
+
+GET /damage-cases/{id}
+Return one damage case with events and photos.
+
+POST /damage-cases/{id}/quote
+Body:
+{
+  "damage_amount": 0,
+  "other_charges": 0,
+  "notes": ""
+}
+Calculate:
+refund_amount = deposit_amount - damage_amount - other_charges
+Set:
+status = tenant_approval_pending
+waiting_on = Reservations/Ops
+Send WhatsApp message to reservations_number asking them to share charges with tenant.
+
+POST /damage-cases/{id}/tenant-approved
+Set:
+status = gm_action_pending
+waiting_on = GM + Ops Supervisor
+Send WhatsApp message to gm_number and ops_supervisor_number saying tenant approved and GM must purchase/place the item.
+
+POST /damage-cases/{id}/gm-purchased
+Set:
+status = placement_proof_pending
+waiting_on = GM
+Send WhatsApp message to gm_number asking for photo proof after placing item.
+
+POST /damage-cases/{id}/photo
+Body:
+{
+  "photo_url_or_media_id": "",
+  "photo_type": "placement_proof"
+}
+Save photo record.
+Set photo_proof_received = true.
+
+POST /damage-cases/{id}/replacement-placed
+Only allow if photo_proof_received = true.
+Set:
+status = accounts_refund_pending
+waiting_on = Accounts
+Send WhatsApp message to accounts_number with:
+unit name, guest name, deposit amount, damage amount, other charges, refund amount.
+
+If photo_proof_received is false, return 400 with message:
+Photo proof is required before sending to accounts.
+
+POST /damage-cases/{id}/refund-completed
+Set:
+status = closed
+waiting_on = none
+closed_at = current time.
+
+POST /damage-cases/{id}/cancel
+Set:
+status = cancelled
+waiting_on = none.
+
+GET /owner-summary
+Return:
+- total pending cases
+- overdue cases
+- cases waiting on GM
+- cases waiting on Ops Supervisor
+- cases waiting on Reservations/Ops
+- cases waiting on Accounts
+- cases missing photo proof
+- cases closed today
+- top 10 oldest open cases
+
+GET /dashboard-view
+Create a simple HTML dashboard grouped by status.
+Columns:
+Case ID, Unit, Guest, Damage, Status, Waiting On, Deposit, Damage Amount, Other Charges, Refund Amount, Photo Proof, Age, Last Updated.
+
+Add README instructions and Swagger examples.

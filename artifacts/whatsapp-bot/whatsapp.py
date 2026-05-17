@@ -62,3 +62,37 @@ async def send_template_message(
 
     logger.info("WhatsApp template message sent to %s: %s", to, response_data)
     return response_data
+
+
+async def send_text_message(to: str, text: str) -> dict:
+    """Send a free-form text message. Works within 24-hour customer service windows."""
+    phone_number_id = get_phone_number_id()
+    access_token = get_access_token()
+
+    url = f"{WHATSAPP_API_BASE}/{phone_number_id}/messages"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "text",
+        "text": {"body": text},
+    }
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(url, headers=headers, json=payload)
+        response_data = response.json()
+
+    if response.status_code not in (200, 201):
+        logger.warning(
+            "WhatsApp text message failed to %s: status=%d body=%s",
+            to,
+            response.status_code,
+            response_data,
+        )
+        return {"error": response_data, "status_code": response.status_code}
+
+    logger.info("WhatsApp text message sent to %s", to)
+    return response_data

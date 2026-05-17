@@ -12,6 +12,7 @@ from database import init_db, get_db, Task, WhatsAppMessage, Staff
 from schemas import TaskOut, WhatsAppMessageOut, SendTestTaskResponse
 from whatsapp import send_template_message
 from hostfully import get_hostfully_config, fetch_properties, fetch_guests
+from damage_cases import router as damage_router, owner_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,6 +25,9 @@ app = FastAPI(
     description="Send WhatsApp reminders to staff and track task completion.",
     version="1.0.0",
 )
+
+app.include_router(damage_router)
+app.include_router(owner_router)
 
 
 @app.on_event("startup")
