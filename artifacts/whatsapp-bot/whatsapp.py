@@ -41,7 +41,7 @@ async def send_template_message(
         "to": to,
         "type": "template",
         "template": {
-            "name": "task_reminder",
+            "name": "hello_world",
             "language": {"code": "en"},
             "components": [
                 {

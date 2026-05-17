@@ -182,7 +182,7 @@ async def send_test_task(db: Session = Depends(get_db)):
         task_id=task.id,
         staff_whatsapp_number=to_number,
         direction="outbound",
-        message_text=f"Template: task_reminder | {staff_name} | {property_name} | {task_description} | {due_time}",
+        message_text=f"Template: hello_world | {staff_name} | {property_name} | {task_description} | {due_time}",
         raw_payload=json.dumps(wa_response),
     )
     db.add(outbound_msg)

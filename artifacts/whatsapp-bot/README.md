@@ -83,13 +83,13 @@ Receives incoming WhatsApp messages from Meta.
 ### `POST /send-test-task`
 Creates a test task in SQLite and sends a WhatsApp template message to `TEST_WHATSAPP_TO`.
 
-**Template:** `task_reminder` with variables:
+**Template:** `hello_world` with variables:
 1. Staff name
 2. Property name
 3. Task description
 4. Due time
 
-> Make sure your `task_reminder` template is approved in Meta Business Manager.
+> Make sure your `hello_world` template is approved in Meta Business Manager.
 
 ---
 
@@ -100,7 +100,7 @@ Returns all tasks with their current status.
 
 ## WhatsApp Template Setup
 
-Before using `/send-test-task`, you must create and get approved a template named `task_reminder` in [Meta Business Manager](https://business.facebook.com/) → **Account Tools → Message Templates**.
+Before using `/send-test-task`, you must create and get approved a template named `hello_world` in [Meta Business Manager](https://business.facebook.com/) → **Account Tools → Message Templates**.
 
 **Suggested template body:**
 ```
