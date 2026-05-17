@@ -318,8 +318,8 @@ def cancel_case(case_id: int, db: Session = Depends(get_db)):
 owner_router = APIRouter(tags=["Owner Dashboard"])
 
 
-@owner_router.get("/owner-summary", summary="High-level summary for the owner")
-def owner_summary(db: Session = Depends(get_db)):
+def _build_summary(db: Session) -> dict:
+    """Shared logic for owner summary data."""
     now = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -369,6 +369,61 @@ def owner_summary(db: Session = Depends(get_db)):
             }
             for c in oldest_open
         ],
+    }
+
+
+@owner_router.get("/owner-summary", summary="High-level summary for the owner")
+def owner_summary(db: Session = Depends(get_db)):
+    return _build_summary(db)
+
+
+@owner_router.post(
+    "/send-owner-summary",
+    summary="Send owner summary via WhatsApp",
+    description=(
+        "Builds the same data as GET /owner-summary and sends it as a WhatsApp message "
+        "to the number stored in the OWNER_WHATSAPP_NUMBER secret."
+    ),
+)
+async def send_owner_summary(db: Session = Depends(get_db)):
+    import os
+    owner_number = os.getenv("OWNER_WHATSAPP_NUMBER")
+    if not owner_number:
+        raise HTTPException(status_code=500, detail="OWNER_WHATSAPP_NUMBER is not set")
+
+    s = _build_summary(db)
+
+    oldest_lines = ""
+    for i, c in enumerate(s["top_10_oldest_open"][:5], start=1):
+        age = f"{c['age_days']}d" if c["age_days"] is not None else "—"
+        oldest_lines += (
+            f"  {i}. #{c['id']} {c['unit_name']} – {c['guest_name']} "
+            f"({STATUS_LABELS.get(c['status'], c['status'])}, "
+            f"waiting: {c['waiting_on'] or '—'}, age: {age})\n"
+        )
+
+    msg = (
+        f"*Damage Cases Summary*\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📋 Total pending: {s['total_pending']}\n"
+        f"⏰ Overdue: {s['overdue']}\n"
+        f"👤 Waiting on GM: {s['waiting_on_gm']}\n"
+        f"🔧 Waiting on Ops: {s['waiting_on_ops_supervisor']}\n"
+        f"🏠 Waiting on Reservations: {s['waiting_on_reservations']}\n"
+        f"💰 Waiting on Accounts: {s['waiting_on_accounts']}\n"
+        f"📷 Missing photo proof: {s['missing_photo_proof']}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"*Top 5 Oldest Open Cases:*\n"
+        f"{oldest_lines if oldest_lines else '  None'}"
+    )
+
+    wa_result = await send_text_message(owner_number, msg)
+    logger.info("Owner summary sent to %s", owner_number)
+
+    return {
+        "sent_to": owner_number,
+        "summary": s,
+        "whatsapp_result": wa_result,
     }
 
 

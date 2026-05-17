@@ -181,6 +181,25 @@ Operations discovers damage in a unit → GM is chased for a quote → Reservati
 
 **`GET /owner-summary`** — JSON summary: total pending, overdue, broken down by waiting_on, missing photos, closed today, top 10 oldest open cases.
 
+**`POST /send-owner-summary`** — Builds the same summary and sends it as a WhatsApp message to `OWNER_WHATSAPP_NUMBER`. Add that secret in **Tools → Secrets** before calling this endpoint. Returns the summary data plus the WhatsApp API result.
+
+Example message sent to owner:
+```
+Damage Cases Summary
+━━━━━━━━━━━━━━━━━━
+📋 Total pending: 3
+⏰ Overdue: 1
+👤 Waiting on GM: 1
+🔧 Waiting on Ops: 2
+🏠 Waiting on Reservations: 0
+💰 Waiting on Accounts: 1
+📷 Missing photo proof: 2
+━━━━━━━━━━━━━━━━━━
+Top 5 Oldest Open Cases:
+  1. #4 Sunset Villa – John Smith (GM Action Pending, waiting: GM + Ops, age: 5d)
+  ...
+```
+
 **`GET /dashboard-view`** — HTML dashboard grouped by status with all case details. Open directly in a browser.
 
 ---
