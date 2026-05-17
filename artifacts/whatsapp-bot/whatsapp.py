@@ -42,18 +42,7 @@ async def send_template_message(
         "type": "template",
         "template": {
             "name": "hello_world",
-            "language": {"code": "en"},
-            "components": [
-                {
-                    "type": "body",
-                    "parameters": [
-                        {"type": "text", "text": staff_name},
-                        {"type": "text", "text": property_name},
-                        {"type": "text", "text": task_description},
-                        {"type": "text", "text": due_time},
-                    ],
-                }
-            ],
+            "language": {"code": "en_US"},
         },
     }
 
