@@ -1,36 +1,48 @@
-# [Project name]
+# WhatsApp Task Reminder Bot
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+A FastAPI backend that sends WhatsApp reminders to holiday-home staff for cleaning, maintenance, inspection, and check-in readiness tasks. Staff reply to update task status.
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- **WhatsApp Bot workflow** — runs the FastAPI server at port 8000
+- `cd artifacts/whatsapp-bot && uvicorn main:app --reload --port 8000` — run manually
+- Required secrets: `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN`, `TEST_WHATSAPP_TO`
 
 ## Stack
 
-- pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+- Python 3.11 + FastAPI + Uvicorn
+- SQLite via SQLAlchemy ORM
+- httpx for async WhatsApp Cloud API calls
+- Pydantic v2 for request/response schemas
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `artifacts/whatsapp-bot/main.py` — all API endpoints
+- `artifacts/whatsapp-bot/database.py` — SQLAlchemy models + SQLite engine
+- `artifacts/whatsapp-bot/schemas.py` — Pydantic response schemas
+- `artifacts/whatsapp-bot/whatsapp.py` — WhatsApp Cloud API client
+- `artifacts/whatsapp-bot/README.md` — full setup guide including Meta webhook and template setup
+- `artifacts/whatsapp-bot/whatsapp_bot.db` — SQLite database (auto-created on first run)
+
+## API Endpoints
+
+- `GET /` — health check
+- `GET /webhooks/whatsapp` — Meta webhook verification
+- `POST /webhooks/whatsapp` — receive inbound WhatsApp replies, update task status
+- `POST /send-test-task` — create a test task and fire WhatsApp template message
+- `GET /tasks` — list all tasks with status
+- `GET /docs` — interactive Swagger UI
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- SQLite hardcoded (not DATABASE_URL) to avoid picking up any PostgreSQL env var in the workspace.
+- Webhook reply parsing is case-insensitive: "1"/"done" → completed, "2"/"delayed" → delayed, "3"/"issue" → issue.
+- Most-recent open task lookup: when a reply comes in, finds the latest task with `status = "open"` for that phone number.
+- Template message uses WhatsApp Cloud API v19.0 with `task_reminder` template (must be pre-approved in Meta Business Manager).
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+Staff receive WhatsApp reminders about property tasks. They reply with 1, 2, or 3 to mark tasks as completed, delayed, or having an issue. All messages and status changes are stored in SQLite.
 
 ## User preferences
 
@@ -38,8 +50,11 @@ _Populate as you build — explicit user instructions worth remembering across s
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+- The `task_reminder` WhatsApp template must be approved in Meta Business Manager before `/send-test-task` will succeed.
+- Phone numbers must be in international format without `+` (e.g. `447911123456`).
+- Webhook URL must be publicly accessible for Meta to call it — the Replit dev URL works for testing.
+- Set `WHATSAPP_VERIFY_TOKEN` in Replit Secrets before Meta webhook verification will pass.
 
 ## Pointers
 
-- See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details
+- See `artifacts/whatsapp-bot/README.md` for the full step-by-step setup guide.
