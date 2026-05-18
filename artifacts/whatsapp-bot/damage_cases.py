@@ -155,9 +155,9 @@ def list_pending_cases(db: Session = Depends(get_db)):
     description=(
         "Finds all damage cases in status `gm_action_pending` whose `due_at` has passed "
         "and sends a WhatsApp escalation to the GM, Ops Supervisor, and the Owner "
-        "(OWNER_WHATSAPP_NUMBER). Safe to call repeatedly — records each notification "
-        "as a `DamageEvent` so the audit trail is complete. Designed to be triggered "
-        "by an external cron job or manually from the Swagger UI."
+        "(OWNER_WHATSAPP_NUMBER). Each recipient receives at most one escalation per case "
+        "every 6 hours — safe to call hourly without spamming. Each notification is recorded "
+        "as a `DamageEvent` (type `overdue_escalation`) so the audit trail is complete."
     ),
 )
 async def check_overdue(db: Session = Depends(get_db)):
@@ -165,6 +165,7 @@ async def check_overdue(db: Session = Depends(get_db)):
     owner_number = os.getenv("OWNER_WHATSAPP_NUMBER")
     # Use naive UTC so the SQL comparison matches SQLite's string storage format.
     now_naive = datetime.utcnow()
+    throttle_window = timedelta(hours=6)
 
     overdue_cases = (
         db.query(DamageCase)
@@ -178,9 +179,10 @@ async def check_overdue(db: Session = Depends(get_db)):
 
     notified = []
     errors = []
+    skipped_due_to_throttle = 0
 
     for case in overdue_cases:
-        # due_at is stored as naive UTC in SQLite; strip any tzinfo for consistent arithmetic.
+        # due_at stored as naive UTC; strip tzinfo if somehow set.
         due = case.due_at.replace(tzinfo=None) if case.due_at.tzinfo is not None else case.due_at
         hours_overdue = round((now_naive - due).total_seconds() / 3600, 1)
 
@@ -203,12 +205,39 @@ async def check_overdue(db: Session = Depends(get_db)):
 
         case_notified = []
         for role, number in recipients:
+            # Throttle: find the most recent overdue_escalation sent to this number for this case.
+            last_event = (
+                db.query(DamageEvent)
+                .filter(
+                    DamageEvent.damage_case_id == case.id,
+                    DamageEvent.event_type == "overdue_escalation",
+                    DamageEvent.whatsapp_number == number,
+                )
+                .order_by(DamageEvent.created_at.desc())
+                .first()
+            )
+
+            if last_event and last_event.created_at:
+                last_sent = (
+                    last_event.created_at.replace(tzinfo=None)
+                    if last_event.created_at.tzinfo is not None
+                    else last_event.created_at
+                )
+                if (now_naive - last_sent) < throttle_window:
+                    hours_since = round((now_naive - last_sent).total_seconds() / 3600, 1)
+                    logger.info(
+                        "Case %d throttle: skipping %s (%s) — last sent %.1fh ago",
+                        case.id, number, role, hours_since,
+                    )
+                    skipped_due_to_throttle += 1
+                    continue
+
             try:
                 await send_text_message(number, msg)
                 _add_event(db, case.id, "overdue_escalation", msg, number)
                 case_notified.append({"role": role, "number": number})
                 logger.info(
-                    "Case %d gm_action_pending overdue escalation sent to %s (%s)",
+                    "Case %d overdue escalation sent to %s (%s)",
                     case.id, number, role,
                 )
             except Exception as exc:
@@ -216,23 +245,25 @@ async def check_overdue(db: Session = Depends(get_db)):
                 errors.append(err)
                 logger.error("Overdue escalation failed: %s", err)
 
-        notified.append({
-            "case_id": case.id,
-            "unit_name": case.unit_name,
-            "guest_name": case.guest_name,
-            "hours_overdue": hours_overdue,
-            "notified": case_notified,
-        })
+        if case_notified:
+            notified.append({
+                "case_id": case.id,
+                "unit_name": case.unit_name,
+                "guest_name": case.guest_name,
+                "hours_overdue": hours_overdue,
+                "notified": case_notified,
+            })
 
     db.commit()
     logger.info(
-        "check-overdue: %d gm_action_pending case(s) overdue, %d error(s)",
-        len(notified), len(errors),
+        "check-overdue: %d notification(s) sent, %d throttled, %d error(s)",
+        sum(len(n["notified"]) for n in notified), skipped_due_to_throttle, len(errors),
     )
     return {
         "checked_status": "gm_action_pending",
-        "overdue_count": len(notified),
+        "overdue_count": len(overdue_cases),
         "notified": notified,
+        "skipped_due_to_throttle": skipped_due_to_throttle,
         "errors": errors,
     }
 

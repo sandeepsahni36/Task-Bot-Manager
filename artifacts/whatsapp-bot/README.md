@@ -174,7 +174,7 @@ The dashboard "Due In / Overdue" column shows remaining time in green or elapsed
 
 The message includes the case ID, unit, guest, damage amount, and how many hours overdue it is. Each notification is recorded as a `DamageEvent` (type `overdue_escalation`) in the audit trail.
 
-The endpoint is idempotent — safe to call repeatedly. Wire it to a cron job or call it manually from `/docs`:
+The endpoint is designed to be called **hourly** from an external cron job or triggered manually from `/docs`. Each recipient receives **at most one overdue escalation per case every 6 hours** — calling it more frequently will not cause spam.
 
 ```
 POST /damage-cases/check-overdue
@@ -186,11 +186,24 @@ Response:
   "checked_status": "gm_action_pending",
   "overdue_count": 2,
   "notified": [
-    { "case_id": 5, "unit_name": "Villa A", "guest_name": "John Smith", "hours_overdue": 3.2, "notified": [...] }
+    {
+      "case_id": 5,
+      "unit_name": "Villa A",
+      "guest_name": "John Smith",
+      "hours_overdue": 3.2,
+      "notified": [
+        { "role": "gm", "number": "971500000001" },
+        { "role": "ops_supervisor", "number": "971500000002" },
+        { "role": "owner", "number": "971552211129" }
+      ]
+    }
   ],
+  "skipped_due_to_throttle": 3,
   "errors": []
 }
 ```
+
+**Throttle logic:** before sending to each recipient, the endpoint queries `damage_events` for the most recent `overdue_escalation` event for that case + recipient number. If one was sent within the last 6 hours it is skipped and counted in `skipped_due_to_throttle`. The check is per-recipient, so a new GM number added mid-escalation will still receive their first notification.
 
 ### Statuses
 
