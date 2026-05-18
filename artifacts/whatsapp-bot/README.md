@@ -379,15 +379,16 @@ Reply with:
 
 ## Database
 
-SQLite file: `whatsapp_bot.db` (created automatically on first run).
+All data is stored in **Supabase PostgreSQL**. There is no local SQLite file.
 
-### Tables
+Run `schema.sql` once in the Supabase SQL Editor to create all tables and indexes:
 
-**staff** — `id`, `name`, `whatsapp_number`, `role`
-
-**tasks** — `id`, `staff_whatsapp_number`, `property_name`, `task_description`, `due_time`, `status`, `created_at`, `updated_at`
-
-**whatsapp_messages** — `id`, `task_id`, `staff_whatsapp_number`, `direction`, `message_text`, `raw_payload`, `created_at`
+- `tasks` — staff task records and status
+- `whatsapp_messages` — inbound/outbound message log
+- `damage_cases` — full damage case workflow
+- `damage_events` — audit log per damage case transition
+- `damage_photos` — photo proof uploads
+- `checkout_inspections` — Hostfully checkout inspection workflow
 
 ---
 
@@ -395,12 +396,16 @@ SQLite file: `whatsapp_bot.db` (created automatically on first run).
 
 ```bash
 cd artifacts/whatsapp-bot
+python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-export WHATSAPP_ACCESS_TOKEN=your_token
-export WHATSAPP_PHONE_NUMBER_ID=your_phone_id
-export WHATSAPP_VERIFY_TOKEN=your_verify_token
-export TEST_WHATSAPP_TO=447911123456
+
+# Copy and fill in all required variables
+cp .env.example .env
+# edit .env with your real values
+
 uvicorn main:app --reload --port 8000
 ```
+
+`python-dotenv` is included in `requirements.txt`, but FastAPI does **not** auto-load `.env` — use `source .env` or a tool like [direnv](https://direnv.net/) to export the variables before running.
 
 Interactive docs: http://localhost:8000/docs
