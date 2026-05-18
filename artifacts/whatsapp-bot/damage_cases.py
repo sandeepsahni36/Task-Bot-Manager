@@ -594,9 +594,124 @@ def _build_summary(sb: Client) -> dict:
     }
 
 
-@owner_router.get("/owner-summary", summary="High-level summary for the owner")
+@owner_router.get("/owner-summary", response_class=HTMLResponse, summary="High-level summary for the owner")
 def owner_summary(sb: Client = Depends(get_supabase_dep)):
-    return _build_summary(sb)
+    s = _build_summary(sb)
+    now = datetime.utcnow()
+
+    def stat_card(value, label, color="#0f172a"):
+        return f"""
+        <div style="background:#fff;border-radius:12px;padding:20px 24px;
+                    box-shadow:0 1px 4px rgba(0,0,0,.08);min-width:130px;flex:1">
+          <div style="font-size:36px;font-weight:700;color:{color};line-height:1">{value}</div>
+          <div style="font-size:11px;color:#64748b;margin-top:6px;text-transform:uppercase;
+                      letter-spacing:.6px;font-weight:600">{label}</div>
+        </div>"""
+
+    oldest_rows = ""
+    for c in s["top_10_oldest_open"]:
+        status_label = STATUS_LABELS.get(c["status"], c["status"])
+        status_color = STATUS_COLORS.get(c["status"], "#6b7280")
+        age = f"{c['age_days']}d" if c["age_days"] is not None else "—"
+        age_color = "#ef4444" if (c["age_days"] or 0) > 7 else ("#f59e0b" if (c["age_days"] or 0) > 3 else "#64748b")
+        oldest_rows += f"""
+        <tr>
+          <td style="padding:10px 12px;color:#64748b;font-weight:600">#{c['id']}</td>
+          <td style="padding:10px 12px;font-weight:500">{c['unit_name'] or '—'}</td>
+          <td style="padding:10px 12px">{c['guest_name'] or '—'}</td>
+          <td style="padding:10px 12px">
+            <span style="background:{status_color};color:#fff;padding:2px 10px;border-radius:999px;
+                         font-size:11px;white-space:nowrap;font-weight:600">{status_label}</span>
+          </td>
+          <td style="padding:10px 12px;color:#475569">{c['waiting_on'] or '—'}</td>
+          <td style="padding:10px 12px;font-weight:700;color:{age_color}">{age}</td>
+        </tr>"""
+
+    waiting_rows = [
+        ("👤", "GM",           s["waiting_on_gm"],              "#6366f1"),
+        ("🔧", "Ops Supervisor", s["waiting_on_ops_supervisor"],  "#f59e0b"),
+        ("🏠", "Reservations", s["waiting_on_reservations"],     "#3b82f6"),
+        ("💰", "Accounts",     s["waiting_on_accounts"],         "#8b5cf6"),
+    ]
+    waiting_html = ""
+    for icon, label, count, color in waiting_rows:
+        waiting_html += f"""
+        <div style="display:flex;align-items:center;justify-content:space-between;
+                    padding:12px 0;border-bottom:1px solid #f1f5f9">
+          <span style="font-size:14px;color:#374151">{icon} Waiting on {label}</span>
+          <span style="font-size:20px;font-weight:700;color:{color if count > 0 else '#94a3b8'}">{count}</span>
+        </div>"""
+
+    if not s["top_10_oldest_open"]:
+        oldest_table = "<p class='none'>No open cases — all clear!</p>"
+    else:
+        oldest_table = (
+            "<table><thead><tr>"
+            "<th>ID</th><th>Unit</th><th>Guest</th><th>Status</th><th>Waiting On</th><th>Age</th>"
+            f"</tr></thead><tbody>{oldest_rows}</tbody></table>"
+        )
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Owner Summary</title>
+<style>
+  *{{box-sizing:border-box;margin:0;padding:0}}
+  body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+       background:#f1f5f9;color:#1e293b;font-size:14px}}
+  header{{background:#0f172a;color:#fff;padding:18px 28px;
+          display:flex;justify-content:space-between;align-items:center}}
+  header h1{{font-size:18px;font-weight:700}}
+  .refresh{{font-size:12px;color:#94a3b8}}
+  .wrap{{max-width:900px;margin:0 auto;padding:28px 24px}}
+  .grid{{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:28px}}
+  .section{{background:#fff;border-radius:12px;box-shadow:0 1px 4px rgba(0,0,0,.08);
+            padding:24px;margin-bottom:24px}}
+  .section h2{{font-size:14px;font-weight:700;color:#0f172a;margin-bottom:16px;
+               text-transform:uppercase;letter-spacing:.5px}}
+  table{{width:100%;border-collapse:collapse}}
+  th{{background:#f8fafc;padding:10px 12px;text-align:left;font-size:11px;
+      text-transform:uppercase;letter-spacing:.5px;color:#64748b;border-bottom:2px solid #e2e8f0}}
+  tr:hover td{{background:#f8fafc}}
+  .none{{color:#94a3b8;font-style:italic;padding:16px 0;text-align:center}}
+</style>
+</head>
+<body>
+<header>
+  <h1>📋 Owner Summary — Damage Cases</h1>
+  <span class="refresh">
+    {now.strftime("%d %b %Y %H:%M")} UTC &nbsp;·&nbsp;
+    <a href="/owner-summary" style="color:#94a3b8">Refresh</a>
+    &nbsp;·&nbsp;
+    <a href="/dashboard-view" style="color:#94a3b8">Full Dashboard</a>
+  </span>
+</header>
+
+<div class="wrap">
+
+  <div class="grid">
+    {stat_card(s['total_pending'], "Pending Cases", "#f59e0b")}
+    {stat_card(s['overdue'],       "Overdue",        "#ef4444")}
+    {stat_card(s['missing_photo_proof'], "Missing Photo", "#f97316")}
+    {stat_card(s['closed_today'],  "Closed Today",   "#22c55e")}
+  </div>
+
+  <div class="section">
+    <h2>Waiting On</h2>
+    {waiting_html}
+  </div>
+
+  <div class="section">
+    <h2>Top 10 Oldest Open Cases</h2>
+    {oldest_table}
+  </div>
+
+</div>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
 
 
 @owner_router.post(
