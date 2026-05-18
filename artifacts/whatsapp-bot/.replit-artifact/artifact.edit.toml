@@ -1,8 +1,7 @@
-kind = "api"
-previewPath = "/api"
+kind = "web"
+previewPath = "/"
 title = "Holiday Homes Ops Bot"
 version = "1.0.0"
-id = "3B4_FFSkEVBkAeYMFRJ2e"
 
 [[services]]
 localPort = 8000

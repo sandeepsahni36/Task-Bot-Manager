@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import List
 
 from fastapi import FastAPI, Request, Response, Depends, HTTPException, Query
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, HTMLResponse
 from supabase import Client
 
 from schemas import TaskOut, WhatsAppMessageOut, SendTestTaskResponse
@@ -62,9 +62,51 @@ REPLY_MAP = {
 # Health & DB checks
 # ---------------------------------------------------------------------------
 
-@app.get("/", summary="Health check")
-def health_check():
-    return {"status": "ok", "service": "WhatsApp Task Reminder Bot"}
+@app.get("/", response_class=HTMLResponse, summary="Homepage")
+def homepage():
+    html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Holiday Homes Ops Bot</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+           background: #f1f5f9; color: #1e293b; min-height: 100vh;
+           display: flex; align-items: center; justify-content: center; }
+    .card { background: #fff; border-radius: 12px; padding: 48px 40px;
+            box-shadow: 0 4px 24px rgba(0,0,0,.08); max-width: 520px; width: 100%; }
+    .badge { display: inline-block; background: #dcfce7; color: #16a34a;
+             font-size: 12px; font-weight: 600; padding: 4px 12px;
+             border-radius: 999px; margin-bottom: 20px; letter-spacing: .3px; }
+    h1 { font-size: 26px; font-weight: 700; margin-bottom: 8px; }
+    p  { color: #64748b; font-size: 14px; margin-bottom: 32px; line-height: 1.6; }
+    ul { list-style: none; display: flex; flex-direction: column; gap: 10px; }
+    a  { display: flex; align-items: center; gap: 10px; padding: 12px 16px;
+         background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px;
+         text-decoration: none; color: #1e293b; font-size: 14px; font-weight: 500;
+         transition: background .15s; }
+    a:hover { background: #f1f5f9; border-color: #cbd5e1; }
+    .icon { font-size: 18px; width: 24px; text-align: center; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="badge">&#x25cf; Running</div>
+    <h1>Holiday Homes Ops Bot</h1>
+    <p>WhatsApp task reminders and damage case management for Everluxe Real Estate And Holiday Homes — powered by FastAPI and Supabase.</p>
+    <ul>
+      <li><a href="/docs"><span class="icon">&#128196;</span>API Docs (Swagger UI)</a></li>
+      <li><a href="/dashboard-view"><span class="icon">&#128202;</span>Damage Cases Dashboard</a></li>
+      <li><a href="/owner-summary"><span class="icon">&#128203;</span>Owner Summary (JSON)</a></li>
+      <li><a href="/damage-cases/pending"><span class="icon">&#9203;</span>Pending Damage Cases (JSON)</a></li>
+      <li><a href="/db/health"><span class="icon">&#10003;</span>Database Health Check</a></li>
+    </ul>
+  </div>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
 
 
 @app.get(
