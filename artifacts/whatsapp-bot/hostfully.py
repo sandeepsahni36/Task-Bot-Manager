@@ -25,16 +25,58 @@ def get_headers(api_key: str) -> dict:
     }
 
 
-async def fetch_properties(api_key: str, agency_uid: str, base_url: str) -> dict:
+async def fetch_properties(api_key: str, agency_uid: str, base_url: str) -> tuple:
     url = f"{base_url}/properties"
     params = {"agencyUid": agency_uid}
     async with httpx.AsyncClient(timeout=15.0) as client:
         response = await client.get(url, headers=get_headers(api_key), params=params)
-    return response.status_code, response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+    ct = response.headers.get("content-type", "")
+    return response.status_code, response.json() if ct.startswith("application/json") else {}
 
 
 async def fetch_guests(api_key: str, agency_uid: str, base_url: str) -> tuple:
     url = f"{base_url}/guests/{agency_uid}"
     async with httpx.AsyncClient(timeout=15.0) as client:
         response = await client.get(url, headers=get_headers(api_key))
-    return response.status_code, response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+    ct = response.headers.get("content-type", "")
+    return response.status_code, response.json() if ct.startswith("application/json") else {}
+
+
+async def fetch_bookings(
+    api_key: str,
+    agency_uid: str,
+    base_url: str,
+    checkout_from: str = None,
+    checkout_to: str = None,
+    checkin_from: str = None,
+    checkin_to: str = None,
+    property_uid: str = None,
+    limit: int = 200,
+) -> tuple:
+    """
+    Fetch bookings/leads from the Hostfully API.
+
+    Date filter params follow Hostfully v2 conventions:
+      - checkOutAfter / checkOutBefore  — filter by checkout date
+      - checkInAfter  / checkInBefore   — filter by check-in date
+      - propertyUid                     — filter by property
+    """
+    url = f"{base_url}/bookings"
+    params: dict = {"agencyUid": agency_uid, "limit": limit, "offset": 0}
+
+    if checkout_from:
+        params["checkOutAfter"] = checkout_from
+    if checkout_to:
+        params["checkOutBefore"] = checkout_to
+    if checkin_from:
+        params["checkInAfter"] = checkin_from
+    if checkin_to:
+        params["checkInBefore"] = checkin_to
+    if property_uid:
+        params["propertyUid"] = property_uid
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.get(url, headers=get_headers(api_key), params=params)
+
+    ct = response.headers.get("content-type", "")
+    return response.status_code, response.json() if ct.startswith("application/json") else {}

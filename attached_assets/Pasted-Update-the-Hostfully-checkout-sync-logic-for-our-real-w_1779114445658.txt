@@ -1,0 +1,105 @@
+Update the Hostfully checkout sync logic for our real workflow.
+
+Important business rule:
+In Hostfully, we do not extend the current booking. If a guest extends, we create a new booking/rebooking. So the bot should detect extension-like rebookings by comparing checkout bookings against new bookings for the same property and guest.
+
+Use environment variable:
+DEFAULT_OPS_WHATSAPP_NUMBER
+
+When Hostfully shows a booking checking out today/tomorrow:
+1. Before messaging operations, search Hostfully reservations/bookings for a matching new booking.
+2. A matching rebooking/extension is:
+   - same hostfully_property_uid
+   - and either same hostfully_guest_uid, same guest phone/email, or same guest name
+   - and new booking check-in is on the same day as old checkout or within 24 hours after old checkout
+   - and new booking status is active/confirmed/booked, not cancelled
+3. If a matching rebooking is found:
+   - create or update checkout_inspection
+   - set status = rebooked_extension_detected
+   - store linked_new_booking_uid
+   - set scheduled_checkout_at = new booking checkout date/time
+   - do not send checkout inspection request for the old booking
+   - optionally send an informational WhatsApp to operations/reservations saying inspection moved to the new checkout date
+4. If no matching rebooking is found:
+   - create checkout_verification_pending
+   - send WhatsApp to DEFAULT_OPS_WHATSAPP_NUMBER:
+     “Checkout verification required. Unit: {unit_name}. Guest: {guest_name}. Scheduled checkout: {checkout_at}. Reply 1 Guest checked out, inspect unit, 2 Guest still inside / late checkout, 3 Issue.”
+
+Update checkout_inspections table:
+id
+hostfully_reservation_uid
+linked_new_booking_uid
+hostfully_property_uid
+hostfully_guest_uid
+unit_name
+guest_name
+guest_phone
+guest_email
+scheduled_checkout_at
+original_checkout_at
+actual_checkout_at
+status
+assigned_ops_number
+late_checkout_followup_at
+damage_case_id
+created_at
+updated_at
+last_hostfully_sync_at
+last_message_sent_at
+
+Statuses:
+checkout_verification_pending
+rebooked_extension_detected
+late_checkout
+inspection_pending
+no_damage_reported
+damage_reported
+issue
+closed
+
+Add/modify endpoint:
+POST /hostfully/sync-checkouts
+
+Behavior:
+1. Pull Hostfully reservations/checkouts.
+2. Find bookings with checkout due today or tomorrow.
+3. Avoid duplicate checkout_inspections by hostfully_reservation_uid.
+4. Avoid duplicate WhatsApp messages for already-created inspections unless status requires a reminder.
+5. Detect rebooking/extension before messaging operations.
+6. Create/update checkout_inspection accordingly.
+
+Return:
+created_count
+updated_count
+rebooked_extension_detected_count
+inspection_messages_sent
+skipped_count
+errors
+
+Add endpoints:
+GET /checkout-inspections
+GET /checkout-inspections/pending
+
+Add reply handling:
+POST /checkout-inspections/{id}/reply
+Body:
+{
+  "reply": "1"
+}
+
+Reply behavior:
+1 = status inspection_pending; ask operations to inspect and report no damages/damages.
+2 = status late_checkout; ask operations/reservations to confirm whether a new rebooking exists; set follow-up reminder.
+3 = status issue; notify owner/supervisor.
+
+Add endpoint:
+POST /checkout-inspections/check-due
+
+Behavior:
+1. Find checkout_verification_pending or late_checkout records whose scheduled/followup time has arrived.
+2. Send WhatsApp reminder to assigned_ops_number.
+3. Do not send duplicate reminders more than once every 3 hours.
+
+Update dashboard-view to show checkout inspection statuses and highlight rebooked_extension_detected cases separately.
+Update README with the rebooking/extension detection rules.
+Do not change existing damage-case workflow behavior.

@@ -647,6 +647,11 @@ async def send_owner_summary(sb: Client = Depends(get_supabase_dep)):
 def dashboard_view(sb: Client = Depends(get_supabase_dep)):
     rows_raw = sb.table("damage_cases").select("*").order("created_at", desc=True).execute().data
     cases = [SimpleNamespace(**r) for r in rows_raw]
+
+    # Checkout inspections
+    ci_raw = sb.table("checkout_inspections").select("*").order("scheduled_checkout_at", desc=True).execute().data
+    ci_cases = [SimpleNamespace(**r) for r in ci_raw]
+
     now = datetime.utcnow()
 
     grouped: dict[str, list] = {s: [] for s in STATUS_LABELS}
@@ -738,12 +743,66 @@ def dashboard_view(sb: Client = Depends(get_supabase_dep)):
     total = len(cases)
     pending = len([c for c in cases if c.status not in ("closed", "cancelled")])
 
+    # --- Checkout inspection table rows ---
+    from checkout_inspections import CHECKOUT_STATUS_LABELS, CHECKOUT_STATUS_COLORS
+
+    ci_grouped: dict[str, list] = {s: [] for s in CHECKOUT_STATUS_LABELS}
+    for c in ci_cases:
+        ci_grouped.setdefault(c.status, []).append(c)
+
+    ci_rows_html = ""
+    for status_key, label in CHECKOUT_STATUS_LABELS.items():
+        group = ci_grouped.get(status_key, [])
+        color = CHECKOUT_STATUS_COLORS.get(status_key, "#6b7280")
+        is_rebooked = status_key == "rebooked_extension_detected"
+        header_style = (
+            f"background:{color};color:#fff;font-weight:600;padding:8px 12px;font-size:13px;letter-spacing:.5px"
+            + (";border-left:4px solid #1d4ed8" if is_rebooked else "")
+        )
+        ci_rows_html += f"""
+        <tr>
+          <td colspan="10" style="{header_style}">
+            {("🔄 " if is_rebooked else "")}{label} &nbsp;({len(group)})
+          </td>
+        </tr>"""
+        if not group:
+            ci_rows_html += """
+        <tr><td colspan="10" style="color:#9ca3af;padding:8px 12px;font-style:italic">No records</td></tr>"""
+        for c in group:
+            updated_dt = _parse_dt(c.updated_at)
+            updated_str = updated_dt.strftime("%d %b %H:%M") if updated_dt else "—"
+            sched_dt = _parse_dt(c.scheduled_checkout_at)
+            sched_str = sched_dt.strftime("%d %b %H:%M") if sched_dt else "—"
+            linked = getattr(c, "linked_new_booking_uid", None) or "—"
+            ci_rows_html += f"""
+        <tr{"  style='background:#eff6ff'" if is_rebooked else ""}>
+          <td>#{c.id}</td>
+          <td>{c.unit_name or "—"}</td>
+          <td>{getattr(c, "guest_name", None) or "—"}</td>
+          <td style="white-space:nowrap">{sched_str}</td>
+          <td><span style="background:{color};color:#fff;padding:2px 8px;border-radius:999px;
+              font-size:11px;white-space:nowrap">{label}</span></td>
+          <td style="font-size:11px;color:#64748b">{getattr(c, "hostfully_reservation_uid", "—")[:16]}…</td>
+          <td style="font-size:11px;color:#64748b">{linked[:16] + "…" if linked != "—" and len(linked) > 16 else linked}</td>
+          <td>{getattr(c, "assigned_ops_number", None) or "—"}</td>
+          <td>{updated_str}</td>
+          <td>
+            <a href="/checkout-inspections/{c.id}" style="color:#3b82f6;font-size:12px">View</a>
+          </td>
+        </tr>"""
+
+    ci_total = len(ci_cases)
+    ci_pending = len([c for c in ci_cases if c.status in (
+        "checkout_verification_pending", "late_checkout", "inspection_pending"
+    )])
+    ci_rebooked = len([c for c in ci_cases if c.status == "rebooked_extension_detected"])
+
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Damage Cases Dashboard</title>
+<title>Operations Dashboard</title>
 <style>
   *{{box-sizing:border-box;margin:0;padding:0}}
   body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
@@ -751,7 +810,10 @@ def dashboard_view(sb: Client = Depends(get_supabase_dep)):
   header{{background:#0f172a;color:#fff;padding:16px 24px;
           display:flex;justify-content:space-between;align-items:center}}
   header h1{{font-size:18px;font-weight:700}}
-  .stats{{display:flex;gap:12px;padding:16px 24px;flex-wrap:wrap}}
+  .section-title{{font-size:15px;font-weight:700;color:#0f172a;
+                  padding:20px 24px 8px;border-top:1px solid #e2e8f0;margin-top:8px}}
+  .section-title:first-of-type{{border-top:none;margin-top:0}}
+  .stats{{display:flex;gap:12px;padding:12px 24px;flex-wrap:wrap}}
   .stat{{background:#fff;border-radius:8px;padding:12px 20px;
          box-shadow:0 1px 3px rgba(0,0,0,.08);min-width:120px}}
   .stat .num{{font-size:28px;font-weight:700;line-height:1}}
@@ -759,7 +821,7 @@ def dashboard_view(sb: Client = Depends(get_supabase_dep)):
               letter-spacing:.5px}}
   .wrap{{padding:0 24px 32px}}
   table{{width:100%;border-collapse:collapse;background:#fff;
-         border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.08)}}
+         border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.08);margin-bottom:24px}}
   th{{background:#1e293b;color:#fff;padding:10px 12px;text-align:left;
       font-size:11px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap}}
   td{{padding:8px 12px;border-bottom:1px solid #f1f5f9;vertical-align:top}}
@@ -770,13 +832,15 @@ def dashboard_view(sb: Client = Depends(get_supabase_dep)):
 </head>
 <body>
 <header>
-  <h1>Damage Cases Dashboard</h1>
+  <h1>Operations Dashboard</h1>
   <span class="refresh">Last updated: {now.strftime("%d %b %Y %H:%M")} UTC
     &nbsp;·&nbsp; <a href="/dashboard-view" style="color:#94a3b8">Refresh</a>
   </span>
 </header>
+
+<div class="section-title">📋 Damage Cases</div>
 <div class="stats">
-  <div class="stat"><div class="num">{total}</div><div class="lbl">Total Cases</div></div>
+  <div class="stat"><div class="num">{total}</div><div class="lbl">Total</div></div>
   <div class="stat"><div class="num" style="color:#f59e0b">{pending}</div><div class="lbl">Pending</div></div>
   <div class="stat"><div class="num" style="color:#22c55e">{len([c for c in cases if c.status == "closed"])}</div>
        <div class="lbl">Closed</div></div>
@@ -796,6 +860,28 @@ def dashboard_view(sb: Client = Depends(get_supabase_dep)):
 </thead>
 <tbody>
 {rows_html}
+</tbody>
+</table>
+</div>
+
+<div class="section-title">🏠 Checkout Inspections</div>
+<div class="stats">
+  <div class="stat"><div class="num">{ci_total}</div><div class="lbl">Total</div></div>
+  <div class="stat"><div class="num" style="color:#f59e0b">{ci_pending}</div><div class="lbl">Pending</div></div>
+  <div class="stat"><div class="num" style="color:#3b82f6">{ci_rebooked}</div><div class="lbl">Rebooked</div></div>
+  <div class="stat"><div class="num" style="color:#22c55e">{len([c for c in ci_cases if c.status == "closed"])}</div>
+       <div class="lbl">Closed</div></div>
+</div>
+<div class="wrap">
+<table>
+<thead>
+  <tr>
+    <th>ID</th><th>Unit</th><th>Guest</th><th>Scheduled Checkout</th><th>Status</th>
+    <th>Reservation UID</th><th>Linked Booking</th><th>Ops Number</th><th>Updated</th><th></th>
+  </tr>
+</thead>
+<tbody>
+{ci_rows_html}
 </tbody>
 </table>
 </div>

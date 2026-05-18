@@ -12,6 +12,7 @@ from schemas import TaskOut, WhatsAppMessageOut, SendTestTaskResponse
 from whatsapp import send_template_message
 from hostfully import get_hostfully_config, fetch_properties, fetch_guests
 from damage_cases import router as damage_router, owner_router
+from checkout_inspections import router as checkout_router, hostfully_checkout_router
 from supabase_client import get_supabase_client, get_supabase_dep
 
 logging.basicConfig(
@@ -28,6 +29,8 @@ app = FastAPI(
 
 app.include_router(damage_router)
 app.include_router(owner_router)
+app.include_router(checkout_router)
+app.include_router(hostfully_checkout_router)
 
 
 @app.on_event("startup")

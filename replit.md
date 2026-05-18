@@ -6,7 +6,7 @@ A FastAPI backend that sends WhatsApp reminders to holiday-home staff for cleani
 
 - **WhatsApp Bot workflow** — runs the FastAPI server at port 8000
 - `cd artifacts/whatsapp-bot && uvicorn main:app --reload --port 8000` — run manually
-- Required secrets: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN`, `TEST_WHATSAPP_TO`, `OWNER_WHATSAPP_NUMBER`
+- Required secrets: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN`, `TEST_WHATSAPP_TO`, `OWNER_WHATSAPP_NUMBER`, `DEFAULT_OPS_WHATSAPP_NUMBER`
 
 ## Stack
 
@@ -18,18 +18,18 @@ A FastAPI backend that sends WhatsApp reminders to holiday-home staff for cleani
 ## Where things live
 
 - `artifacts/whatsapp-bot/main.py` — all API endpoints (tasks, webhooks, health, Hostfully)
-- `artifacts/whatsapp-bot/damage_cases.py` — damage case workflow endpoints
+- `artifacts/whatsapp-bot/damage_cases.py` — damage case workflow endpoints + dashboard
+- `artifacts/whatsapp-bot/checkout_inspections.py` — checkout inspection endpoints + `/hostfully/sync-checkouts`
 - `artifacts/whatsapp-bot/supabase_client.py` — Supabase singleton client + FastAPI dependency
 - `artifacts/whatsapp-bot/schema.sql` — PostgreSQL DDL; run once in Supabase SQL Editor
-- `artifacts/whatsapp-bot/database.py` — legacy reference only (no longer used)
 - `artifacts/whatsapp-bot/schemas.py` — Pydantic response schemas
 - `artifacts/whatsapp-bot/whatsapp.py` — WhatsApp Cloud API client
-- `artifacts/whatsapp-bot/hostfully.py` — Hostfully PMS integration
-- `artifacts/whatsapp-bot/README.md` — full setup guide including Supabase, Meta webhook, and template setup
+- `artifacts/whatsapp-bot/hostfully.py` — Hostfully PMS integration (properties, guests, bookings)
+- `artifacts/whatsapp-bot/README.md` — full setup guide
 
 ## API Endpoints
 
-- `GET /` — health check
+- `GET /` — homepage
 - `GET /db/health` — confirm Supabase connection and schema are working
 - `GET /webhooks/whatsapp` — Meta webhook verification
 - `POST /webhooks/whatsapp` — receive inbound WhatsApp replies, update task status
@@ -39,7 +39,12 @@ A FastAPI backend that sends WhatsApp reminders to holiday-home staff for cleani
 - `GET /damage-cases/pending` — list non-closed damage cases
 - `POST /damage-cases/check-overdue` — escalate overdue gm_action_pending cases (6h throttle)
 - `GET /owner-summary` — high-level owner dashboard JSON
-- `GET /dashboard-view` — HTML dashboard grouped by status
+- `GET /dashboard-view` — HTML dashboard (damage cases + checkout inspections)
+- `POST /hostfully/sync-checkouts` — sync Hostfully checkouts, detect rebookings, send ops messages
+- `GET /checkout-inspections` — list all checkout inspections
+- `GET /checkout-inspections/pending` — list pending checkout inspections
+- `POST /checkout-inspections/check-due` — send reminders for due inspections (3h throttle)
+- `POST /checkout-inspections/{id}/reply` — handle ops reply (1/2/3)
 - `GET /docs` — interactive Swagger UI
 
 ## Architecture decisions
@@ -53,6 +58,9 @@ A FastAPI backend that sends WhatsApp reminders to holiday-home staff for cleani
 - 6-hour per-recipient overdue escalation throttle on `check-overdue` endpoint.
 - Photo-proof gate before `replacement-placed` transition.
 - Template message uses WhatsApp Cloud API v19.0 with `task_reminder` template (must be pre-approved in Meta Business Manager).
+- Checkout inspection workflow: `sync-checkouts` deduplicates by `hostfully_reservation_uid`. Rebooking detection matches by property UID + (guest UID | phone | email | name) with check-in within 24h of old checkout. Rebooked cases are flagged without messaging ops. Standard checkouts send a verification message to `DEFAULT_OPS_WHATSAPP_NUMBER`.
+- `check-due` reminder throttle: 3 hours per inspection record (tracks via `last_message_sent_at`).
+- Extensions/rebookings: Everluxe creates a new booking rather than extending; the bot detects this pattern automatically and moves the inspection to the new checkout date.
 
 ## Product
 

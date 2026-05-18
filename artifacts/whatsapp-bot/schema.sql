@@ -75,11 +75,37 @@ CREATE TABLE IF NOT EXISTS damage_photos (
     created_at              TIMESTAMPTZ DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS checkout_inspections (
+    id                          SERIAL PRIMARY KEY,
+    hostfully_reservation_uid   TEXT UNIQUE NOT NULL,
+    linked_new_booking_uid      TEXT,
+    hostfully_property_uid      TEXT,
+    hostfully_guest_uid         TEXT,
+    unit_name                   TEXT NOT NULL,
+    guest_name                  TEXT,
+    guest_phone                 TEXT,
+    guest_email                 TEXT,
+    scheduled_checkout_at       TIMESTAMPTZ,
+    original_checkout_at        TIMESTAMPTZ,
+    actual_checkout_at          TIMESTAMPTZ,
+    status                      TEXT NOT NULL DEFAULT 'checkout_verification_pending',
+    assigned_ops_number         TEXT,
+    late_checkout_followup_at   TIMESTAMPTZ,
+    damage_case_id              INTEGER REFERENCES damage_cases(id),
+    created_at                  TIMESTAMPTZ DEFAULT NOW(),
+    updated_at                  TIMESTAMPTZ DEFAULT NOW(),
+    last_hostfully_sync_at      TIMESTAMPTZ,
+    last_message_sent_at        TIMESTAMPTZ
+);
+
 -- Indexes
-CREATE INDEX IF NOT EXISTS idx_tasks_staff_number        ON tasks(staff_whatsapp_number);
-CREATE INDEX IF NOT EXISTS idx_tasks_status              ON tasks(status);
-CREATE INDEX IF NOT EXISTS idx_wa_messages_staff_number  ON whatsapp_messages(staff_whatsapp_number);
-CREATE INDEX IF NOT EXISTS idx_damage_cases_status       ON damage_cases(status);
-CREATE INDEX IF NOT EXISTS idx_damage_cases_hostfully    ON damage_cases(hostfully_property_uid);
-CREATE INDEX IF NOT EXISTS idx_damage_events_case_id     ON damage_events(damage_case_id);
-CREATE INDEX IF NOT EXISTS idx_damage_photos_case_id     ON damage_photos(damage_case_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_staff_number            ON tasks(staff_whatsapp_number);
+CREATE INDEX IF NOT EXISTS idx_tasks_status                  ON tasks(status);
+CREATE INDEX IF NOT EXISTS idx_wa_messages_staff_number      ON whatsapp_messages(staff_whatsapp_number);
+CREATE INDEX IF NOT EXISTS idx_damage_cases_status           ON damage_cases(status);
+CREATE INDEX IF NOT EXISTS idx_damage_cases_hostfully        ON damage_cases(hostfully_property_uid);
+CREATE INDEX IF NOT EXISTS idx_damage_events_case_id         ON damage_events(damage_case_id);
+CREATE INDEX IF NOT EXISTS idx_damage_photos_case_id         ON damage_photos(damage_case_id);
+CREATE INDEX IF NOT EXISTS idx_checkout_inspections_status   ON checkout_inspections(status);
+CREATE INDEX IF NOT EXISTS idx_checkout_inspections_property ON checkout_inspections(hostfully_property_uid);
+CREATE INDEX IF NOT EXISTS idx_checkout_inspections_uid      ON checkout_inspections(hostfully_reservation_uid);
