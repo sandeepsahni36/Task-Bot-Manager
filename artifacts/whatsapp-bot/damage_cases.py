@@ -57,8 +57,8 @@ def _touch(case: DamageCase):
 
 
 def _set_due_at(case: DamageCase, hours: int):
-    """Set due_at to now + N hours."""
-    case.due_at = datetime.now(timezone.utc) + timedelta(hours=hours)
+    """Set due_at to now + N hours, stored as naive UTC (SQLite-compatible)."""
+    case.due_at = datetime.utcnow() + timedelta(hours=hours)
 
 
 def _get_case_or_404(db: Session, case_id: int) -> DamageCase:
@@ -147,6 +147,94 @@ def list_pending_cases(db: Session = Depends(get_db)):
         .order_by(DamageCase.created_at.desc())
         .all()
     )
+
+
+@router.post(
+    "/check-overdue",
+    summary="Notify GM + Ops Supervisor + Owner for every overdue gm_action_pending case",
+    description=(
+        "Finds all damage cases in status `gm_action_pending` whose `due_at` has passed "
+        "and sends a WhatsApp escalation to the GM, Ops Supervisor, and the Owner "
+        "(OWNER_WHATSAPP_NUMBER). Safe to call repeatedly — records each notification "
+        "as a `DamageEvent` so the audit trail is complete. Designed to be triggered "
+        "by an external cron job or manually from the Swagger UI."
+    ),
+)
+async def check_overdue(db: Session = Depends(get_db)):
+    import os
+    owner_number = os.getenv("OWNER_WHATSAPP_NUMBER")
+    # Use naive UTC so the SQL comparison matches SQLite's string storage format.
+    now_naive = datetime.utcnow()
+
+    overdue_cases = (
+        db.query(DamageCase)
+        .filter(
+            DamageCase.status == "gm_action_pending",
+            DamageCase.due_at.isnot(None),
+            DamageCase.due_at < now_naive,
+        )
+        .all()
+    )
+
+    notified = []
+    errors = []
+
+    for case in overdue_cases:
+        # due_at is stored as naive UTC in SQLite; strip any tzinfo for consistent arithmetic.
+        due = case.due_at.replace(tzinfo=None) if case.due_at.tzinfo is not None else case.due_at
+        hours_overdue = round((now_naive - due).total_seconds() / 3600, 1)
+
+        msg = (
+            f"*⚠ Overdue Damage Case #{case.id}*\n"
+            f"Unit: {case.unit_name} | Guest: {case.guest_name}\n"
+            f"Damage: {case.damage_description}\n"
+            f"Damage amount: AED {(case.damage_amount or 0):.2f}\n"
+            f"Overdue by: {hours_overdue}h\n\n"
+            f"This case is awaiting GM action (purchase + placement of replacement item). "
+            f"Please action this immediately."
+        )
+
+        recipients = [
+            ("gm", case.gm_number),
+            ("ops_supervisor", case.ops_supervisor_number),
+        ]
+        if owner_number:
+            recipients.append(("owner", owner_number))
+
+        case_notified = []
+        for role, number in recipients:
+            try:
+                await send_text_message(number, msg)
+                _add_event(db, case.id, "overdue_escalation", msg, number)
+                case_notified.append({"role": role, "number": number})
+                logger.info(
+                    "Case %d gm_action_pending overdue escalation sent to %s (%s)",
+                    case.id, number, role,
+                )
+            except Exception as exc:
+                err = f"Case {case.id} → {role} ({number}): {exc}"
+                errors.append(err)
+                logger.error("Overdue escalation failed: %s", err)
+
+        notified.append({
+            "case_id": case.id,
+            "unit_name": case.unit_name,
+            "guest_name": case.guest_name,
+            "hours_overdue": hours_overdue,
+            "notified": case_notified,
+        })
+
+    db.commit()
+    logger.info(
+        "check-overdue: %d gm_action_pending case(s) overdue, %d error(s)",
+        len(notified), len(errors),
+    )
+    return {
+        "checked_status": "gm_action_pending",
+        "overdue_count": len(notified),
+        "notified": notified,
+        "errors": errors,
+    }
 
 
 @router.get("/{case_id}", response_model=DamageCaseDetail, summary="Get one damage case with events and photos")

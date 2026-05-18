@@ -162,6 +162,36 @@ Steps must be called in strict order. Calling a step out of sequence returns `HT
 
 The dashboard "Due In / Overdue" column shows remaining time in green or elapsed time in red (⚠). An "Overdue" stat card counts all breached deadlines at a glance.
 
+### Overdue Escalation
+
+`POST /damage-cases/check-overdue` scans every `gm_action_pending` case whose `due_at` has passed and sends a WhatsApp escalation to three recipients:
+
+| Recipient | Source |
+|---|---|
+| GM | `gm_number` on the case |
+| Ops Supervisor | `ops_supervisor_number` on the case |
+| Owner | `OWNER_WHATSAPP_NUMBER` environment secret |
+
+The message includes the case ID, unit, guest, damage amount, and how many hours overdue it is. Each notification is recorded as a `DamageEvent` (type `overdue_escalation`) in the audit trail.
+
+The endpoint is idempotent — safe to call repeatedly. Wire it to a cron job or call it manually from `/docs`:
+
+```
+POST /damage-cases/check-overdue
+```
+
+Response:
+```json
+{
+  "checked_status": "gm_action_pending",
+  "overdue_count": 2,
+  "notified": [
+    { "case_id": 5, "unit_name": "Villa A", "guest_name": "John Smith", "hours_overdue": 3.2, "notified": [...] }
+  ],
+  "errors": []
+}
+```
+
 ### Statuses
 
 | Status | Meaning |
