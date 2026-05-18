@@ -60,7 +60,6 @@ class DamageCaseCreate(BaseModel):
     reservations_number: str
     accounts_number: str
     reported_by_number: Optional[str] = None
-    due_at: Optional[datetime] = None
 
 
 class QuoteBody(BaseModel):

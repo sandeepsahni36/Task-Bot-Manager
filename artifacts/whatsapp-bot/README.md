@@ -147,6 +147,21 @@ Steps must be called in strict order. Calling a step out of sequence returns `HT
 
 `POST /{id}/cancel` can be called at any status.
 
+### Deadline Rules (`due_at`)
+
+`due_at` is set automatically on every status transition — it is not accepted as a request body field. Closed and cancelled cases always have `due_at = null`.
+
+| Status entered | Deadline | Set by |
+|---|---|---|
+| `quote_pending` | **now + 24 h** | Case creation |
+| `tenant_approval_pending` | **now + 24 h** | `POST /{id}/quote` |
+| `gm_action_pending` | **now + 46 h** | `POST /{id}/tenant-approved` |
+| `placement_proof_pending` | **now + 24 h** | `POST /{id}/gm-purchased` |
+| `accounts_refund_pending` | **now + 24 h** | `POST /{id}/replacement-placed` |
+| `closed` / `cancelled` | **null** | `refund-completed` / `cancel` |
+
+The dashboard "Due In / Overdue" column shows remaining time in green or elapsed time in red (⚠). An "Overdue" stat card counts all breached deadlines at a glance.
+
 ### Statuses
 
 | Status | Meaning |

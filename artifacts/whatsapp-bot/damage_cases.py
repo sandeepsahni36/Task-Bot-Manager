@@ -56,6 +56,11 @@ def _touch(case: DamageCase):
     case.updated_at = datetime.now(timezone.utc)
 
 
+def _set_due_at(case: DamageCase, hours: int):
+    """Set due_at to now + N hours."""
+    case.due_at = datetime.now(timezone.utc) + timedelta(hours=hours)
+
+
 def _get_case_or_404(db: Session, case_id: int) -> DamageCase:
     case = db.query(DamageCase).filter(DamageCase.id == case_id).first()
     if not case:
@@ -107,9 +112,9 @@ async def create_damage_case(body: DamageCaseCreate, db: Session = Depends(get_d
         reservations_number=body.reservations_number,
         accounts_number=body.accounts_number,
         photo_proof_received=False,
-        due_at=body.due_at,
     )
     db.add(case)
+    _set_due_at(case, 24)  # quote_pending: 24-hour deadline
     db.commit()
     db.refresh(case)
 
@@ -166,6 +171,7 @@ async def submit_quote(case_id: int, body: QuoteBody, db: Session = Depends(get_
     case.refund_amount = case.deposit_amount - body.damage_amount - body.other_charges
     case.status = "tenant_approval_pending"
     case.waiting_on = "Reservations/Ops"
+    _set_due_at(case, 24)  # tenant_approval_pending: 24-hour deadline
     _touch(case)
 
     notes_line = f"\nNotes: {body.notes}" if body.notes else ""
@@ -202,6 +208,7 @@ async def tenant_approved(case_id: int, db: Session = Depends(get_db)):
 
     case.status = "gm_action_pending"
     case.waiting_on = "GM + Ops Supervisor"
+    _set_due_at(case, 46)  # gm_action_pending: 46-hour deadline
     _touch(case)
 
     msg = (
@@ -229,6 +236,7 @@ async def gm_purchased(case_id: int, db: Session = Depends(get_db)):
 
     case.status = "placement_proof_pending"
     case.waiting_on = "GM"
+    _set_due_at(case, 24)  # placement_proof_pending: 24-hour deadline
     _touch(case)
 
     msg = (
@@ -286,6 +294,7 @@ async def replacement_placed(case_id: int, db: Session = Depends(get_db)):
 
     case.status = "accounts_refund_pending"
     case.waiting_on = "Accounts"
+    _set_due_at(case, 24)  # accounts_refund_pending: 24-hour deadline
     _touch(case)
 
     refund = case.refund_amount if case.refund_amount is not None else 0.0
@@ -318,6 +327,7 @@ def refund_completed(case_id: int, db: Session = Depends(get_db)):
 
     case.status = "closed"
     case.waiting_on = None
+    case.due_at = None
     case.closed_at = datetime.now(timezone.utc)
     _touch(case)
 
@@ -334,6 +344,7 @@ def cancel_case(case_id: int, db: Session = Depends(get_db)):
 
     case.status = "cancelled"
     case.waiting_on = None
+    case.due_at = None
     _touch(case)
 
     _add_event(db, case.id, "case_cancelled", "Case cancelled.")
@@ -483,20 +494,44 @@ def dashboard_view(db: Session = Depends(get_db)):
     def photo_badge(v):
         return '<span style="color:#22c55e">✓</span>' if v else '<span style="color:#ef4444">✗</span>'
 
+    def fmt_due(c):
+        if c.status in ("closed", "cancelled") or not c.due_at:
+            return "—"
+        due = c.due_at.replace(tzinfo=timezone.utc) if c.due_at.tzinfo is None else c.due_at
+        overdue = due < now
+        diff = abs(due - now)
+        total_mins = int(diff.total_seconds() // 60)
+        if total_mins < 60:
+            label = f"{total_mins}m"
+        elif total_mins < 1440:
+            label = f"{total_mins // 60}h {total_mins % 60}m"
+        else:
+            label = f"{diff.days}d {(total_mins % 1440) // 60}h"
+        if overdue:
+            return f'<span style="color:#ef4444;font-weight:600">⚠ {label} ago</span>'
+        return f'<span style="color:#16a34a">{label} left</span>'
+
+    overdue_count = sum(
+        1 for c in cases
+        if c.status not in ("closed", "cancelled")
+        and c.due_at
+        and c.due_at.replace(tzinfo=timezone.utc if c.due_at.tzinfo is None else c.due_at.tzinfo) < now
+    )
+
     rows_html = ""
     for status_key, label in STATUS_LABELS.items():
         group = grouped.get(status_key, [])
         color = STATUS_COLORS.get(status_key, "#6b7280")
         rows_html += f"""
         <tr>
-          <td colspan="14" style="background:{color};color:#fff;font-weight:600;
+          <td colspan="15" style="background:{color};color:#fff;font-weight:600;
               padding:8px 12px;font-size:13px;letter-spacing:.5px">
             {label} &nbsp;({len(group)})
           </td>
         </tr>"""
         if not group:
             rows_html += """
-        <tr><td colspan="14" style="color:#9ca3af;padding:8px 12px;font-style:italic">No cases</td></tr>"""
+        <tr><td colspan="15" style="color:#9ca3af;padding:8px 12px;font-style:italic">No cases</td></tr>"""
         for c in group:
             rows_html += f"""
         <tr>
@@ -514,6 +549,7 @@ def dashboard_view(db: Session = Depends(get_db)):
           <td>{fmt_money(c.refund_amount)}</td>
           <td style="text-align:center">{photo_badge(c.photo_proof_received)}</td>
           <td>{age(c)}</td>
+          <td style="white-space:nowrap">{fmt_due(c)}</td>
           <td>{c.updated_at.strftime("%d %b %H:%M") if c.updated_at else "—"}</td>
           <td>
             <a href="/damage-cases/{c.id}" style="color:#3b82f6;font-size:12px">View</a>
@@ -567,6 +603,8 @@ def dashboard_view(db: Session = Depends(get_db)):
        <div class="lbl">Closed</div></div>
   <div class="stat"><div class="num" style="color:#ef4444">{len([c for c in cases if c.status not in("closed","cancelled") and not c.photo_proof_received])}</div>
        <div class="lbl">Missing Photo</div></div>
+  <div class="stat"><div class="num" style="color:#dc2626">{overdue_count}</div>
+       <div class="lbl">Overdue</div></div>
 </div>
 <div class="wrap">
 <table>
@@ -574,7 +612,7 @@ def dashboard_view(db: Session = Depends(get_db)):
   <tr>
     <th>ID</th><th>Unit</th><th>Guest</th><th>Damage</th><th>Status</th>
     <th>Waiting On</th><th>Deposit</th><th>Damage Amt</th><th>Other Chg</th>
-    <th>Refund</th><th>Photo</th><th>Age</th><th>Updated</th><th></th>
+    <th>Refund</th><th>Photo</th><th>Age</th><th>Due In / Overdue</th><th>Updated</th><th></th>
   </tr>
 </thead>
 <tbody>
