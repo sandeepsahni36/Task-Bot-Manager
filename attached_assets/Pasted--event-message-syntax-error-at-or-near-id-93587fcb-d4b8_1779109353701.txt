@@ -1,0 +1,44 @@
+{
+  "event_message": "syntax error at or near \"#\"",
+  "id": "93587fcb-d4b8-493e-a0d7-049ca1e006e9",
+  "metadata": [
+    {
+      "file": null,
+      "host": "db-ghhavthtroxypsrhomgh",
+      "metadata": [],
+      "parsed": [
+        {
+          "application_name": "supabase/dashboard-query-editor",
+          "backend_type": "client backend",
+          "command_tag": "idle",
+          "connection_from": "2406:da18:96a:8201:4b78:fa03:adcf:126a:37830",
+          "context": null,
+          "database_name": "postgres",
+          "detail": null,
+          "error_severity": "ERROR",
+          "hint": null,
+          "internal_query": null,
+          "internal_query_pos": null,
+          "leader_pid": null,
+          "location": null,
+          "process_id": 8644,
+          "query": "# WhatsApp Task Reminder Bot\r\n\r\nA FastAPI backend that sends WhatsApp reminders to holiday-home staff for cleaning, maintenance, inspection, and check-in readiness tasks. Staff reply to update task status.\r\n\r\n## Run & Operate\r\n\r\n- **WhatsApp Bot workflow** — runs the FastAPI server at port 8000\r\n- `cd artifacts/whatsapp-bot && uvicorn main:app --reload --port 8000` — run manually\r\n- Required secrets: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN`, `TEST_WHATSAPP_TO`, `OWNER_WHATSAPP_NUMBER`\r\n\r\n## Stack\r\n\r\n- Python 3.11 + FastAPI + Uvicorn\r\n- Supabase PostgreSQL via `supabase-py` v2 (REST/PostgREST client)\r\n- httpx for async WhatsApp Cloud API calls\r\n- Pydantic v2 for request/response schemas\r\n\r\n## Where things live\r\n\r\n- `artifacts/whatsapp-bot/main.py` — all API endpoints (tasks, webhooks, health, Hostfully)\r\n- `artifacts/whatsapp-bot/damage_cases.py` — damage case workflow endpoints\r\n- `artifacts/whatsapp-bot/supabase_client.py` — Supabase singleton client + FastAPI dependency\r\n- `artifacts/whatsapp-bot/schema.sql` — PostgreSQL DDL; run once in Supabase SQL Editor\r\n- `artifacts/whatsapp-bot/database.py` — legacy reference only (no longer used)\r\n- `artifacts/whatsapp-bot/schemas.py` — Pydantic response schemas\r\n- `artifacts/whatsapp-bot/whatsapp.py` — WhatsApp Cloud API client\r\n- `artifacts/whatsapp-bot/hostfully.py` — Hostfully PMS integration\r\n- `artifacts/whatsapp-bot/README.md` — full setup guide including Supabase, Meta webhook, and template setup\r\n\r\n## API Endpoints\r\n\r\n- `GET /` — health check\r\n- `GET /db/health` — confirm Supabase connection and schema are working\r\n- `GET /webhooks/whatsapp` — Meta webhook verification\r\n- `POST /webhooks/whatsapp` — receive inbound WhatsApp replies, update task status\r\n- `POST /send-test-task` — create a test task and fire WhatsApp template message\r\n- `GET /tasks` — list all tasks with status\r\n- `GET /damage-cases` — list all damage cases\r\n- `GET /damage-cases/pending` — list non-closed damage cases\r\n- `POST /damage-cases/check-overdue` — escalate overdue gm_action_pending cases (6h throttle)\r\n- `GET /owner-summary` — high-level owner dashboard JSON\r\n- `GET /dashboard-view` — HTML dashboard grouped by status\r\n- `GET /docs` — interactive Swagger UI\r\n\r\n## Architecture decisions\r\n\r\n- Supabase Python client (`supabase-py` v2) uses PostgREST REST API with `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`. No direct Postgres connection string needed.\r\n- Singleton client initialised at startup; warning logged if secrets are missing.\r\n- Webhook reply parsing is case-insensitive: \"1\"/\"done\" → completed, \"2\"/\"delayed\" → delayed, \"3\"/\"issue\" → issue.\r\n- Most-recent open task lookup: when a reply comes in, finds the latest task with `status = \"open\"` for that phone number.\r\n- Damage case workflow: strict status ordering enforced at each transition, 400 with current/required status on mismatch.\r\n- Auto due_at deadlines at each transition (24h/46h rules).\r\n- 6-hour per-recipient overdue escalation throttle on `check-overdue` endpoint.\r\n- Photo-proof gate before `replacement-placed` transition.\r\n- Template message uses WhatsApp Cloud API v19.0 with `task_reminder` template (must be pre-approved in Meta Business Manager).\r\n\r\n## Product\r\n\r\nStaff receive WhatsApp reminders about property tasks. They reply with 1, 2, or 3 to mark tasks as completed, delayed, or having an issue. A full damage case workflow tracks property damages from discovery through refund, with Hostfully PMS integration. All data is stored in Supabase PostgreSQL.\r\n\r\n## User preferences\r\n\r\n_Populate as you build — explicit user instructions worth remembering across sessions._\r\n\r\n## Gotchas\r\n\r\n- The `task_reminder` WhatsApp template must be approved in Meta Business Manager before `/send-test-task` will succeed.\r\n- Phone numbers must be in international format without `+` (e.g. `447911123456`).\r\n- Webhook URL must be publicly accessible for Meta to call it — the Replit dev URL works for testing.\r\n- Set `WHATSAPP_VERIFY_TOKEN` in Replit Secrets before Meta webhook verification will pass.\r\n\r\n## Pointers\r\n\r\n- See `artifacts/whatsapp-bot/README.md` for the full step-by-step setup guide.\r\n\n\n-- source: dashboard\n-- user: session:9d47f225-e030-4e22-be9e-46a67509cbe6\n-- date: 2026-05-18T13:01:12.046Z",
+          "query_id": 0,
+          "query_pos": 1,
+          "session_id": "6a0b0d98.21c4",
+          "session_line_num": 4,
+          "session_start_time": "2026-05-18 13:01:12 UTC",
+          "sql_state_code": "42601",
+          "timestamp": "2026-05-18 13:01:12.592 UTC",
+          "transaction_id": 0,
+          "user_name": "postgres",
+          "virtual_transaction_id": "12/34"
+        }
+      ],
+      "parsed_from": null,
+      "project": null,
+      "source_type": null
+    }
+  ],
+  "timestamp": 1779109272592000
+}
