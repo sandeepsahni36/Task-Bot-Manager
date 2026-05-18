@@ -1,0 +1,12 @@
+[build]
+command = "pnpm --filter @workspace/ops-ui... run build"
+publish = "artifacts/ops-ui/dist/public"
+
+[build.environment]
+PORT = "5173"
+BASE_PATH = "/"
+
+[[redirects]]
+from = "/*"
+to = "/index.html"
+status = 200
