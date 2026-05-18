@@ -6,43 +6,57 @@ A FastAPI backend that sends WhatsApp reminders to holiday-home staff for cleani
 
 - **WhatsApp Bot workflow** — runs the FastAPI server at port 8000
 - `cd artifacts/whatsapp-bot && uvicorn main:app --reload --port 8000` — run manually
-- Required secrets: `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN`, `TEST_WHATSAPP_TO`
+- Required secrets: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN`, `TEST_WHATSAPP_TO`, `OWNER_WHATSAPP_NUMBER`
 
 ## Stack
 
 - Python 3.11 + FastAPI + Uvicorn
-- SQLite via SQLAlchemy ORM
+- Supabase PostgreSQL via `supabase-py` v2 (REST/PostgREST client)
 - httpx for async WhatsApp Cloud API calls
 - Pydantic v2 for request/response schemas
 
 ## Where things live
 
-- `artifacts/whatsapp-bot/main.py` — all API endpoints
-- `artifacts/whatsapp-bot/database.py` — SQLAlchemy models + SQLite engine
+- `artifacts/whatsapp-bot/main.py` — all API endpoints (tasks, webhooks, health, Hostfully)
+- `artifacts/whatsapp-bot/damage_cases.py` — damage case workflow endpoints
+- `artifacts/whatsapp-bot/supabase_client.py` — Supabase singleton client + FastAPI dependency
+- `artifacts/whatsapp-bot/schema.sql` — PostgreSQL DDL; run once in Supabase SQL Editor
+- `artifacts/whatsapp-bot/database.py` — legacy reference only (no longer used)
 - `artifacts/whatsapp-bot/schemas.py` — Pydantic response schemas
 - `artifacts/whatsapp-bot/whatsapp.py` — WhatsApp Cloud API client
-- `artifacts/whatsapp-bot/README.md` — full setup guide including Meta webhook and template setup
-- `artifacts/whatsapp-bot/whatsapp_bot.db` — SQLite database (auto-created on first run)
+- `artifacts/whatsapp-bot/hostfully.py` — Hostfully PMS integration
+- `artifacts/whatsapp-bot/README.md` — full setup guide including Supabase, Meta webhook, and template setup
 
 ## API Endpoints
 
 - `GET /` — health check
+- `GET /db/health` — confirm Supabase connection and schema are working
 - `GET /webhooks/whatsapp` — Meta webhook verification
 - `POST /webhooks/whatsapp` — receive inbound WhatsApp replies, update task status
 - `POST /send-test-task` — create a test task and fire WhatsApp template message
 - `GET /tasks` — list all tasks with status
+- `GET /damage-cases` — list all damage cases
+- `GET /damage-cases/pending` — list non-closed damage cases
+- `POST /damage-cases/check-overdue` — escalate overdue gm_action_pending cases (6h throttle)
+- `GET /owner-summary` — high-level owner dashboard JSON
+- `GET /dashboard-view` — HTML dashboard grouped by status
 - `GET /docs` — interactive Swagger UI
 
 ## Architecture decisions
 
-- SQLite hardcoded (not DATABASE_URL) to avoid picking up any PostgreSQL env var in the workspace.
+- Supabase Python client (`supabase-py` v2) uses PostgREST REST API with `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`. No direct Postgres connection string needed.
+- Singleton client initialised at startup; warning logged if secrets are missing.
 - Webhook reply parsing is case-insensitive: "1"/"done" → completed, "2"/"delayed" → delayed, "3"/"issue" → issue.
 - Most-recent open task lookup: when a reply comes in, finds the latest task with `status = "open"` for that phone number.
+- Damage case workflow: strict status ordering enforced at each transition, 400 with current/required status on mismatch.
+- Auto due_at deadlines at each transition (24h/46h rules).
+- 6-hour per-recipient overdue escalation throttle on `check-overdue` endpoint.
+- Photo-proof gate before `replacement-placed` transition.
 - Template message uses WhatsApp Cloud API v19.0 with `task_reminder` template (must be pre-approved in Meta Business Manager).
 
 ## Product
 
-Staff receive WhatsApp reminders about property tasks. They reply with 1, 2, or 3 to mark tasks as completed, delayed, or having an issue. All messages and status changes are stored in SQLite.
+Staff receive WhatsApp reminders about property tasks. They reply with 1, 2, or 3 to mark tasks as completed, delayed, or having an issue. A full damage case workflow tracks property damages from discovery through refund, with Hostfully PMS integration. All data is stored in Supabase PostgreSQL.
 
 ## User preferences
 

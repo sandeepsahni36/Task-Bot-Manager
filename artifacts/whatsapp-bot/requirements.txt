@@ -1,6 +1,6 @@
 fastapi
 uvicorn[standard]
-sqlalchemy
 httpx
 pydantic
 python-multipart
+supabase>=2.0.0

@@ -6,13 +6,13 @@ from typing import List
 
 from fastapi import FastAPI, Request, Response, Depends, HTTPException, Query
 from fastapi.responses import PlainTextResponse
-from sqlalchemy.orm import Session
+from supabase import Client
 
-from database import init_db, get_db, Task, WhatsAppMessage, Staff
 from schemas import TaskOut, WhatsAppMessageOut, SendTestTaskResponse
 from whatsapp import send_template_message
 from hostfully import get_hostfully_config, fetch_properties, fetch_guests
 from damage_cases import router as damage_router, owner_router
+from supabase_client import get_supabase_client, get_supabase_dep
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="WhatsApp Task Reminder Bot",
     description="Send WhatsApp reminders to staff and track task completion.",
-    version="1.0.0",
+    version="2.0.0",
 )
 
 app.include_router(damage_router)
@@ -32,8 +32,20 @@ app.include_router(owner_router)
 
 @app.on_event("startup")
 def on_startup():
-    init_db()
-    logger.info("Database initialised")
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    if not url or not key:
+        logger.warning(
+            "SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is not set — "
+            "all database endpoints will return 500 until both secrets are configured. "
+            "Add them in Replit Secrets and restart the server."
+        )
+    else:
+        try:
+            get_supabase_client()
+            logger.info("Supabase client ready")
+        except Exception as exc:
+            logger.error("Failed to initialise Supabase client: %s", exc)
 
 
 REPLY_MAP = {
@@ -46,10 +58,52 @@ REPLY_MAP = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Health & DB checks
+# ---------------------------------------------------------------------------
+
 @app.get("/", summary="Health check")
 def health_check():
     return {"status": "ok", "service": "WhatsApp Task Reminder Bot"}
 
+
+@app.get(
+    "/db/health",
+    summary="Confirm Supabase connection is working",
+    description=(
+        "Attempts a lightweight query against the `tasks` table. "
+        "Returns 200 with `{ok: true}` on success, or 503 with error details if "
+        "the connection fails or the secrets are missing."
+    ),
+)
+def db_health():
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    if not url or not key:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "ok": False,
+                "error": "SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is not set.",
+                "hint": "Add both secrets in Replit Secrets and restart the server.",
+            },
+        )
+    try:
+        sb = get_supabase_client()
+        sb.table("tasks").select("id").limit(1).execute()
+        logger.info("DB health check passed")
+        return {"ok": True, "supabase_url": url}
+    except Exception as exc:
+        logger.error("DB health check failed: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail={"ok": False, "error": str(exc)},
+        )
+
+
+# ---------------------------------------------------------------------------
+# WhatsApp webhook
+# ---------------------------------------------------------------------------
 
 @app.get("/webhooks/whatsapp", response_class=PlainTextResponse, summary="Meta webhook verification")
 def verify_webhook(
@@ -75,7 +129,7 @@ def verify_webhook(
 
 
 @app.post("/webhooks/whatsapp", summary="Receive incoming WhatsApp messages")
-async def receive_webhook(request: Request, db: Session = Depends(get_db)):
+async def receive_webhook(request: Request, sb: Client = Depends(get_supabase_dep)):
     try:
         body = await request.json()
     except Exception:
@@ -96,61 +150,60 @@ async def receive_webhook(request: Request, db: Session = Depends(get_db)):
 
                     from_number = msg.get("from", "")
                     text = msg.get("text", {}).get("body", "").strip().lower()
-
                     raw_payload_str = json.dumps(body)
-                    wa_msg = WhatsAppMessage(
-                        staff_whatsapp_number=from_number,
-                        direction="inbound",
-                        message_text=text,
-                        raw_payload=raw_payload_str,
-                    )
 
                     new_status = REPLY_MAP.get(text)
+                    task_id = None
 
                     if new_status:
-                        task = (
-                            db.query(Task)
-                            .filter(
-                                Task.staff_whatsapp_number == from_number,
-                                Task.status == "open",
-                            )
-                            .order_by(Task.created_at.desc())
-                            .first()
+                        task_resp = (
+                            sb.table("tasks")
+                            .select("*")
+                            .eq("staff_whatsapp_number", from_number)
+                            .eq("status", "open")
+                            .order("created_at", desc=True)
+                            .limit(1)
+                            .execute()
                         )
-                        if task:
-                            task.status = new_status
-                            task.updated_at = datetime.now(timezone.utc)
-                            wa_msg.task_id = task.id
-                            db.add(task)
+                        if task_resp.data:
+                            task = task_resp.data[0]
+                            task_id = task["id"]
+                            sb.table("tasks").update({
+                                "status": new_status,
+                                "updated_at": datetime.utcnow().isoformat(),
+                            }).eq("id", task_id).execute()
                             logger.info(
                                 "Task %d updated to '%s' by %s",
-                                task.id,
-                                new_status,
-                                from_number,
+                                task_id, new_status, from_number,
                             )
                         else:
-                            logger.info(
-                                "No open task found for %s to update", from_number
-                            )
+                            logger.info("No open task found for %s to update", from_number)
                     else:
                         logger.info(
-                            "Unrecognised reply '%s' from %s — no status update",
-                            text,
-                            from_number,
+                            "Unrecognised reply '%s' from %s — no status update", text, from_number,
                         )
 
-                    db.add(wa_msg)
+                    sb.table("whatsapp_messages").insert({
+                        "task_id": task_id,
+                        "staff_whatsapp_number": from_number,
+                        "direction": "inbound",
+                        "message_text": text,
+                        "raw_payload": raw_payload_str,
+                        "created_at": datetime.utcnow().isoformat(),
+                    }).execute()
 
-        db.commit()
     except Exception as exc:
         logger.exception("Error processing webhook: %s", exc)
-        db.rollback()
 
     return {"status": "ok"}
 
 
+# ---------------------------------------------------------------------------
+# Task endpoints
+# ---------------------------------------------------------------------------
+
 @app.post("/send-test-task", response_model=SendTestTaskResponse, summary="Create a test task and send WhatsApp reminder")
-async def send_test_task(db: Session = Depends(get_db)):
+async def send_test_task(sb: Client = Depends(get_supabase_dep)):
     to_number = os.getenv("TEST_WHATSAPP_TO")
     if not to_number:
         raise HTTPException(status_code=500, detail="TEST_WHATSAPP_TO is not set")
@@ -159,18 +212,19 @@ async def send_test_task(db: Session = Depends(get_db)):
     property_name = "Sunset Villa"
     task_description = "Clean and prepare all bedrooms before guest check-in"
     due_time = "14:00 today"
+    now = datetime.utcnow().isoformat()
 
-    task = Task(
-        staff_whatsapp_number=to_number,
-        property_name=property_name,
-        task_description=task_description,
-        due_time=due_time,
-        status="open",
-    )
-    db.add(task)
-    db.commit()
-    db.refresh(task)
-    logger.info("Test task created: id=%d for %s", task.id, to_number)
+    task_resp = sb.table("tasks").insert({
+        "staff_whatsapp_number": to_number,
+        "property_name": property_name,
+        "task_description": task_description,
+        "due_time": due_time,
+        "status": "open",
+        "created_at": now,
+        "updated_at": now,
+    }).execute()
+    task = task_resp.data[0]
+    logger.info("Test task created: id=%d for %s", task["id"], to_number)
 
     try:
         wa_response = await send_template_message(
@@ -183,61 +237,60 @@ async def send_test_task(db: Session = Depends(get_db)):
     except ValueError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
-    outbound_msg = WhatsAppMessage(
-        task_id=task.id,
-        staff_whatsapp_number=to_number,
-        direction="outbound",
-        message_text=f"Template: hello_world | {staff_name} | {property_name} | {task_description} | {due_time}",
-        raw_payload=json.dumps(wa_response),
-    )
-    db.add(outbound_msg)
-    db.commit()
+    sb.table("whatsapp_messages").insert({
+        "task_id": task["id"],
+        "staff_whatsapp_number": to_number,
+        "direction": "outbound",
+        "message_text": f"Template: hello_world | {staff_name} | {property_name} | {task_description} | {due_time}",
+        "raw_payload": json.dumps(wa_response),
+        "created_at": datetime.utcnow().isoformat(),
+    }).execute()
 
     return SendTestTaskResponse(
-        task_id=task.id,
+        task_id=task["id"],
         whatsapp_response=wa_response,
         message=f"Test task created and WhatsApp reminder sent to {to_number}",
     )
 
 
 @app.get("/tasks", response_model=List[TaskOut], summary="List all tasks (newest first)")
-def list_tasks(db: Session = Depends(get_db)):
-    tasks = db.query(Task).order_by(Task.created_at.desc()).all()
-    return tasks
+def list_tasks(sb: Client = Depends(get_supabase_dep)):
+    resp = sb.table("tasks").select("*").order("created_at", desc=True).execute()
+    return [TaskOut.model_validate(r) for r in resp.data]
 
 
 @app.post("/tasks/clear-test", summary="Delete all test tasks for Sunset Villa")
-def clear_test_tasks(db: Session = Depends(get_db)):
-    deleted = (
-        db.query(Task)
-        .filter(Task.property_name == "Sunset Villa")
-        .delete(synchronize_session=False)
+def clear_test_tasks(sb: Client = Depends(get_supabase_dep)):
+    resp = (
+        sb.table("tasks")
+        .delete()
+        .eq("property_name", "Sunset Villa")
+        .execute()
     )
-    db.commit()
+    deleted = len(resp.data) if resp.data else 0
     logger.info("Cleared %d test task(s) for Sunset Villa", deleted)
     return {"deleted": deleted, "message": f"Deleted {deleted} test task(s) with property_name='Sunset Villa'"}
 
 
 @app.post("/tasks/{task_id}/close", response_model=TaskOut, summary="Mark a task as closed/cancelled")
-def close_task(task_id: int, db: Session = Depends(get_db)):
-    task = db.query(Task).filter(Task.id == task_id).first()
-    if not task:
+def close_task(task_id: int, sb: Client = Depends(get_supabase_dep)):
+    check = sb.table("tasks").select("id").eq("id", task_id).execute()
+    if not check.data:
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-    task.status = "closed"
-    task.updated_at = datetime.now(timezone.utc)
-    db.commit()
-    db.refresh(task)
+    resp = sb.table("tasks").update({
+        "status": "closed",
+        "updated_at": datetime.utcnow().isoformat(),
+    }).eq("id", task_id).execute()
     logger.info("Task %d marked as closed", task_id)
-    return task
+    return TaskOut.model_validate(resp.data[0])
 
 
 @app.delete("/tasks/{task_id}", summary="Delete a task by ID")
-def delete_task(task_id: int, db: Session = Depends(get_db)):
-    task = db.query(Task).filter(Task.id == task_id).first()
-    if not task:
+def delete_task(task_id: int, sb: Client = Depends(get_supabase_dep)):
+    check = sb.table("tasks").select("id").eq("id", task_id).execute()
+    if not check.data:
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-    db.delete(task)
-    db.commit()
+    sb.table("tasks").delete().eq("id", task_id).execute()
     logger.info("Task %d deleted", task_id)
     return {"deleted": task_id, "message": f"Task {task_id} deleted"}
 
@@ -287,7 +340,6 @@ async def hostfully_properties():
         )
 
     items = data if isinstance(data, list) else data.get("properties", data.get("results", []))
-
     results = []
     for p in items:
         results.append({
@@ -317,7 +369,6 @@ async def hostfully_guests():
         )
 
     items = data if isinstance(data, list) else data.get("guests", data.get("results", []))
-
     results = []
     for g in items[:10]:
         results.append({

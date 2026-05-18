@@ -8,24 +8,67 @@ A FastAPI backend that sends WhatsApp reminders to holiday-home staff for cleani
 
 1. You call `POST /send-test-task` to create a task and send a WhatsApp template message.
 2. The staff member receives the message and replies: `1` (done), `2` (delayed), or `3` (issue).
-3. The webhook receives the reply and updates the task status in SQLite.
+3. The webhook receives the reply and updates the task status in Supabase PostgreSQL.
 
 ---
 
 ## Running on Replit
 
-### 1. Set Replit Secrets
+### 1. Create a Supabase Project
+
+1. Go to [supabase.com](https://supabase.com) and create a free account.
+2. Click **New project**, give it a name (e.g. `everluxe-bot`), and set a database password. Copy the password somewhere safe.
+3. Wait for the project to provision (~1 minute).
+
+### 2. Create the Database Tables
+
+1. In your Supabase project, open **SQL Editor** (left sidebar).
+2. Paste the entire contents of `schema.sql` (in this folder) into the editor.
+3. Click **Run**. All 5 tables and indexes will be created.
+
+### 3. Get Your Supabase Credentials
+
+In your Supabase project, go to **Project Settings → API**:
+
+| What | Where |
+|---|---|
+| **Project URL** | Under "Project URL" — looks like `https://xxxx.supabase.co` |
+| **Service Role Key** | Under "Project API keys" → `service_role` (hidden by default — click to reveal) |
+
+> Use the **service_role** key, not the `anon` key. The service role key bypasses Row Level Security and is required for server-side operations.
+
+### 4. Set Replit Secrets
 
 Go to **Tools → Secrets** in your Replit workspace and add:
 
 | Secret name | Value |
 |---|---|
+| `SUPABASE_URL` | Your Supabase project URL (e.g. `https://xxxx.supabase.co`) |
+| `SUPABASE_SERVICE_ROLE_KEY` | Your Supabase service role key |
 | `WHATSAPP_ACCESS_TOKEN` | Your Meta Cloud API permanent access token |
 | `WHATSAPP_PHONE_NUMBER_ID` | Your WhatsApp Business phone number ID |
 | `WHATSAPP_VERIFY_TOKEN` | Any random string you choose (e.g. `my_secret_token_123`) |
 | `TEST_WHATSAPP_TO` | A WhatsApp number to receive test messages (e.g. `447911123456`) |
+| `OWNER_WHATSAPP_NUMBER` | Owner's WhatsApp number for overdue escalations and summaries |
+| `HOSTFULLY_API_KEY` | Your Hostfully API key (optional) |
+| `HOSTFULLY_AGENCY_UID` | Your Hostfully agency UID (optional) |
 
 > **Phone number format:** Include country code, no `+`, no spaces. Example: `447911123456`
+
+### 5. Test the Database Connection
+
+After adding the secrets and restarting the server, call:
+
+```bash
+curl https://<your-repl-domain>/db/health
+```
+
+Expected response when working:
+```json
+{ "ok": true, "supabase_url": "https://xxxx.supabase.co" }
+```
+
+If you see `503`, the secrets are missing or incorrect — double-check `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`.
 
 ### 2. Start the Server
 
@@ -80,8 +123,13 @@ Receives incoming WhatsApp messages from Meta.
 
 ---
 
+### `GET /db/health`
+Confirms the Supabase connection is working. Returns `200 {"ok": true}` or `503` with error details.
+
+---
+
 ### `POST /send-test-task`
-Creates a test task in SQLite and sends a WhatsApp template message to `TEST_WHATSAPP_TO`.
+Creates a test task in Supabase and sends a WhatsApp template message to `TEST_WHATSAPP_TO`.
 
 **Template:** `hello_world` with variables:
 1. Staff name
