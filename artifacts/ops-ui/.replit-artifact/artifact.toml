@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "Holiday Homes Ops Bot"
+version = "1.0.0"
+id = "artifacts/ops-ui"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 19010
+
+[services.development]
+run = "pnpm --filter @workspace/ops-ui run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/ops-ui", "run", "build" ]
+publicDir = "artifacts/ops-ui/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "19010"
+BASE_PATH = "/"
