@@ -1,11 +1,12 @@
-const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
+const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
 
 const links = [
-  { href: "/docs",                 icon: "📄", label: "API Docs",              desc: "Swagger UI — all endpoints" },
-  { href: "/dashboard-view",       icon: "📊", label: "Damage Cases Dashboard", desc: "All cases grouped by status" },
-  { href: "/owner-summary",        icon: "📋", label: "Owner Summary",          desc: "High-level metrics (JSON)" },
-  { href: "/damage-cases/pending", icon: "⏳", label: "Pending Cases",          desc: "Open damage cases (JSON)" },
-  { href: "/db/health",            icon: "✅", label: "Database Health",         desc: "Supabase connection status" },
+  { href: "/docs",                 icon: "📄", label: "API Docs",                desc: "Swagger UI — all endpoints" },
+  { href: "/dashboard-view",       icon: "📊", label: "Operations Dashboard",     desc: "Damage cases + checkout inspections" },
+  { href: "/owner-summary",        icon: "📋", label: "Owner Summary",            desc: "High-level metrics (JSON)" },
+  { href: "/damage-cases/pending", icon: "⏳", label: "Pending Damage Cases",     desc: "Open damage cases (JSON)" },
+  { href: "/checkout-inspections/pending", icon: "🏠", label: "Pending Checkouts", desc: "Open checkout inspections (JSON)" },
+  { href: "/db/health",            icon: "✅", label: "Database Health",           desc: "Supabase connection status" },
 ];
 
 export default function App() {
@@ -55,7 +56,9 @@ export default function App() {
           {links.map(({ href, icon, label, desc }) => (
             <a
               key={href}
-              href={href}
+              href={API_BASE + href}
+              target="_blank"
+              rel="noopener noreferrer"
               style={{
                 display: "flex",
                 alignItems: "center",
@@ -92,7 +95,7 @@ export default function App() {
           color: "#94a3b8",
           textAlign: "center",
         }}>
-          Powered by FastAPI + Supabase · <a href="/docs" style={{ color: "#94a3b8" }}>API v2.0</a>
+          Powered by FastAPI + Supabase · <a href={API_BASE + "/docs"} target="_blank" rel="noopener noreferrer" style={{ color: "#94a3b8" }}>API v2.0</a>
         </p>
       </div>
     </div>

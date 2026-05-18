@@ -5,6 +5,10 @@ publish = "artifacts/ops-ui/dist/public"
 [build.environment]
 PORT = "5173"
 BASE_PATH = "/"
+# Set VITE_API_BASE_URL in the Netlify dashboard (Site settings → Environment variables)
+# to your deployed Replit backend URL, e.g. https://your-app.replit.app
+# Leave empty to use relative URLs (works when served from Replit directly).
+VITE_API_BASE_URL = ""
 
 [[redirects]]
 from = "/*"
