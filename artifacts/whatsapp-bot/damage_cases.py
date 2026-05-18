@@ -63,6 +63,21 @@ def _get_case_or_404(db: Session, case_id: int) -> DamageCase:
     return case
 
 
+def _require_status(case: DamageCase, required: str, extra_check: str = None):
+    """Raise 400 if the case is not in the required status (or fails an extra condition)."""
+    if case.status != required:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Invalid workflow step — case is not in the required status.",
+                "current_status": case.status,
+                "required_status": required,
+            },
+        )
+    if extra_check:
+        raise HTTPException(status_code=400, detail={"error": extra_check})
+
+
 @router.post("", response_model=DamageCaseOut, summary="Create a new damage case")
 async def create_damage_case(body: DamageCaseCreate, db: Session = Depends(get_db)):
     if not body.unit_name and not body.hostfully_property_uid:
@@ -144,6 +159,7 @@ def get_damage_case(case_id: int, db: Session = Depends(get_db)):
 @router.post("/{case_id}/quote", response_model=DamageCaseOut, summary="Submit damage quote")
 async def submit_quote(case_id: int, body: QuoteBody, db: Session = Depends(get_db)):
     case = _get_case_or_404(db, case_id)
+    _require_status(case, "quote_pending")
 
     case.damage_amount = body.damage_amount
     case.other_charges = body.other_charges
@@ -173,6 +189,16 @@ async def submit_quote(case_id: int, body: QuoteBody, db: Session = Depends(get_
 @router.post("/{case_id}/tenant-approved", response_model=DamageCaseOut, summary="Mark tenant as approved")
 async def tenant_approved(case_id: int, db: Session = Depends(get_db)):
     case = _get_case_or_404(db, case_id)
+    _require_status(case, "tenant_approval_pending")
+    if case.refund_amount is None:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Cannot mark tenant as approved — refund_amount is not set. Submit a quote first.",
+                "current_status": case.status,
+                "required_status": "tenant_approval_pending",
+            },
+        )
 
     case.status = "gm_action_pending"
     case.waiting_on = "GM + Ops Supervisor"
@@ -199,6 +225,7 @@ async def tenant_approved(case_id: int, db: Session = Depends(get_db)):
 @router.post("/{case_id}/gm-purchased", response_model=DamageCaseOut, summary="GM confirms item purchased")
 async def gm_purchased(case_id: int, db: Session = Depends(get_db)):
     case = _get_case_or_404(db, case_id)
+    _require_status(case, "gm_action_pending")
 
     case.status = "placement_proof_pending"
     case.waiting_on = "GM"
@@ -246,11 +273,15 @@ async def add_photo(case_id: int, body: PhotoBody, db: Session = Depends(get_db)
 @router.post("/{case_id}/replacement-placed", response_model=DamageCaseOut, summary="Confirm replacement placed — notifies Accounts")
 async def replacement_placed(case_id: int, db: Session = Depends(get_db)):
     case = _get_case_or_404(db, case_id)
-
+    _require_status(case, "placement_proof_pending")
     if not case.photo_proof_received:
         raise HTTPException(
             status_code=400,
-            detail="Photo proof is required before sending to accounts.",
+            detail={
+                "error": "Photo proof is required before sending to accounts.",
+                "current_status": case.status,
+                "required_status": "placement_proof_pending",
+            },
         )
 
     case.status = "accounts_refund_pending"
@@ -283,6 +314,7 @@ async def replacement_placed(case_id: int, db: Session = Depends(get_db)):
 @router.post("/{case_id}/refund-completed", response_model=DamageCaseOut, summary="Mark refund as completed — closes case")
 def refund_completed(case_id: int, db: Session = Depends(get_db)):
     case = _get_case_or_404(db, case_id)
+    _require_status(case, "accounts_refund_pending")
 
     case.status = "closed"
     case.waiting_on = None

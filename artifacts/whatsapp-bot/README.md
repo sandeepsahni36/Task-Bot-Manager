@@ -123,6 +123,30 @@ curl -X POST https://<your-repl-domain>/tasks/clear-test
 
 Operations discovers damage in a unit → GM is chased for a quote → Reservations shares charges with tenant → Tenant approves → GM purchases and places replacement → Photo proof required → Accounts processes refund → Case closed.
 
+### Workflow Order & Validation
+
+Steps must be called in strict order. Calling a step out of sequence returns `HTTP 400` with the current and required status:
+
+```json
+{
+  "error": "Invalid workflow step — case is not in the required status.",
+  "current_status": "quote_pending",
+  "required_status": "tenant_approval_pending"
+}
+```
+
+| Step | Endpoint | Required status | Extra condition |
+|---|---|---|---|
+| 1 | `POST /damage-cases` | — | Creates case, status → `quote_pending` |
+| 2 | `POST /{id}/quote` | `quote_pending` | — |
+| 3 | `POST /{id}/tenant-approved` | `tenant_approval_pending` | `refund_amount` must not be null |
+| 4 | `POST /{id}/gm-purchased` | `gm_action_pending` | — |
+| 5 | `POST /{id}/photo` | any status | Sets `photo_proof_received = true` |
+| 6 | `POST /{id}/replacement-placed` | `placement_proof_pending` | `photo_proof_received` must be `true` |
+| 7 | `POST /{id}/refund-completed` | `accounts_refund_pending` | — |
+
+`POST /{id}/cancel` can be called at any status.
+
 ### Statuses
 
 | Status | Meaning |
