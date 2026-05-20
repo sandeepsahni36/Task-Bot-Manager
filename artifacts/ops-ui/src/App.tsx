@@ -1,12 +1,14 @@
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
+const API_CONFIGURED = API_BASE.length > 0;
 
 const LINKS = [
   { href: "/docs",                         icon: "📄", label: "API Docs",                desc: "Swagger UI — all endpoints" },
   { href: "/dashboard-view",               icon: "📊", label: "Operations Dashboard",     desc: "Damage cases + checkout inspections" },
   { href: "/owner-summary",                icon: "📋", label: "Owner Summary",            desc: "High-level metrics (JSON)" },
-  { href: "/damage-cases/pending",         icon: "⏳", label: "Pending Damage Cases",     desc: "Open damage cases (JSON)" },
   { href: "/checkout-inspections/pending", icon: "🏠", label: "Pending Checkouts",        desc: "Open checkout inspections (JSON)" },
+  { href: "/damage-cases/pending",         icon: "⏳", label: "Pending Damage Cases",     desc: "Open damage cases (JSON)" },
   { href: "/db/health",                    icon: "✅", label: "Database Health",           desc: "Supabase connection status" },
+  { href: "/debug/routes",                 icon: "🔍", label: "Debug: Routes",            desc: "All registered API routes" },
 ];
 
 export default function App() {
@@ -25,9 +27,27 @@ export default function App() {
         borderRadius: "16px",
         padding: "48px 44px",
         boxShadow: "0 4px 32px rgba(0,0,0,0.08)",
-        maxWidth: "540px",
+        maxWidth: "560px",
         width: "100%",
       }}>
+
+        {!API_CONFIGURED && (
+          <div style={{
+            background: "#fef2f2",
+            border: "1px solid #fecaca",
+            borderRadius: "8px",
+            padding: "12px 16px",
+            marginBottom: "24px",
+            color: "#991b1b",
+            fontSize: "13px",
+            lineHeight: 1.5,
+          }}>
+            <strong>Backend API URL is not configured.</strong><br />
+            Set <code>VITE_API_BASE_URL</code> in your Netlify environment variables
+            (e.g. <code>https://task-bot-manager.replit.app</code>) and redeploy.
+          </div>
+        )}
+
         <div style={{
           display: "inline-flex",
           alignItems: "center",
@@ -52,42 +72,48 @@ export default function App() {
           <strong style={{ color: "#1e293b" }}>Everluxe Real Estate And Holiday Homes</strong>
         </p>
 
-        <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-          {LINKS.map(({ href, icon, label, desc }) => (
-            <a
-              key={href}
-              href={API_BASE + href}
-              target="_blank"
-              rel="noopener noreferrer"
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: "14px",
-                padding: "14px 16px",
-                background: "#f8fafc",
-                border: "1px solid #e2e8f0",
-                borderRadius: "10px",
-                textDecoration: "none",
-                color: "#1e293b",
-                transition: "all 0.15s",
-              }}
-              onMouseEnter={e => {
-                (e.currentTarget as HTMLAnchorElement).style.background = "#f1f5f9";
-                (e.currentTarget as HTMLAnchorElement).style.borderColor = "#cbd5e1";
-              }}
-              onMouseLeave={e => {
-                (e.currentTarget as HTMLAnchorElement).style.background = "#f8fafc";
-                (e.currentTarget as HTMLAnchorElement).style.borderColor = "#e2e8f0";
-              }}
-            >
-              <span style={{ fontSize: "20px", width: "28px", textAlign: "center", flexShrink: 0 }}>{icon}</span>
-              <div>
-                <div style={{ fontWeight: 600, fontSize: "14px" }}>{label}</div>
-                <div style={{ fontSize: "12px", color: "#64748b", marginTop: "1px" }}>{desc}</div>
-              </div>
-            </a>
-          ))}
-        </div>
+        {API_CONFIGURED ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+            {LINKS.map(({ href, icon, label, desc }) => (
+              <a
+                key={href}
+                href={API_BASE + href}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "14px",
+                  padding: "14px 16px",
+                  background: "#f8fafc",
+                  border: "1px solid #e2e8f0",
+                  borderRadius: "10px",
+                  textDecoration: "none",
+                  color: "#1e293b",
+                  transition: "all 0.15s",
+                }}
+                onMouseEnter={e => {
+                  (e.currentTarget as HTMLAnchorElement).style.background = "#f1f5f9";
+                  (e.currentTarget as HTMLAnchorElement).style.borderColor = "#cbd5e1";
+                }}
+                onMouseLeave={e => {
+                  (e.currentTarget as HTMLAnchorElement).style.background = "#f8fafc";
+                  (e.currentTarget as HTMLAnchorElement).style.borderColor = "#e2e8f0";
+                }}
+              >
+                <span style={{ fontSize: "20px", width: "28px", textAlign: "center", flexShrink: 0 }}>{icon}</span>
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: "14px" }}>{label}</div>
+                  <div style={{ fontSize: "12px", color: "#64748b", marginTop: "1px" }}>{desc}</div>
+                </div>
+              </a>
+            ))}
+          </div>
+        ) : (
+          <div style={{ color: "#94a3b8", fontSize: "13px", textAlign: "center", padding: "16px 0" }}>
+            Configure <code>VITE_API_BASE_URL</code> to enable links.
+          </div>
+        )}
 
         <p style={{
           marginTop: "28px",
@@ -95,7 +121,10 @@ export default function App() {
           color: "#94a3b8",
           textAlign: "center",
         }}>
-          Powered by FastAPI + Supabase · <a href={API_BASE + "/docs"} target="_blank" rel="noopener noreferrer" style={{ color: "#94a3b8" }}>API v2.0</a>
+          Powered by FastAPI + Supabase
+          {API_CONFIGURED && (
+            <> · <a href={API_BASE + "/docs"} target="_blank" rel="noopener noreferrer" style={{ color: "#94a3b8" }}>API v2.0</a></>
+          )}
         </p>
       </div>
     </div>

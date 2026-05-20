@@ -42,7 +42,7 @@ async def fetch_guests(api_key: str, agency_uid: str, base_url: str) -> tuple:
     return response.status_code, response.json() if ct.startswith("application/json") else {}
 
 
-async def fetch_bookings(
+async def fetch_leads(
     api_key: str,
     agency_uid: str,
     base_url: str,
@@ -54,14 +54,17 @@ async def fetch_bookings(
     limit: int = 200,
 ) -> tuple:
     """
-    Fetch bookings/leads from the Hostfully API.
+    Fetch leads/reservations from the Hostfully v2 API.
 
-    Date filter params follow Hostfully v2 conventions:
-      - checkOutAfter / checkOutBefore  — filter by checkout date
-      - checkInAfter  / checkInBefore   — filter by check-in date
-      - propertyUid                     — filter by property
+    Hostfully uses /leads for bookings/reservations. The /bookings endpoint
+    is not supported and returns "Unknown api: bookings".
+
+    Date filter params:
+      checkOutAfter / checkOutBefore  — filter by checkout date
+      checkInAfter  / checkInBefore   — filter by check-in date
+      propertyUid                     — filter by property
     """
-    url = f"{base_url}/bookings"
+    url = f"{base_url}/leads"
     params: dict = {"agencyUid": agency_uid, "limit": limit, "offset": 0}
 
     if checkout_from:
@@ -75,8 +78,22 @@ async def fetch_bookings(
     if property_uid:
         params["propertyUid"] = property_uid
 
+    safe_params = {k: v for k, v in params.items() if k != "agencyUid"}
+    logger.info("Fetching Hostfully leads: url=%s params=%s", url, safe_params)
+
     async with httpx.AsyncClient(timeout=20.0) as client:
         response = await client.get(url, headers=get_headers(api_key), params=params)
 
     ct = response.headers.get("content-type", "")
-    return response.status_code, response.json() if ct.startswith("application/json") else {}
+    try:
+        data = response.json() if ct.startswith("application/json") else {}
+    except Exception:
+        data = {}
+
+    logger.info("Hostfully leads response: status=%d", response.status_code)
+    return response.status_code, data
+
+
+# fetch_bookings is an alias for fetch_leads — the /bookings endpoint does not
+# exist in Hostfully v2; /leads is the correct reservations endpoint.
+fetch_bookings = fetch_leads

@@ -1,16 +1,17 @@
 import os
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List
 
 from fastapi import FastAPI, Request, Response, Depends, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, HTMLResponse
 from supabase import Client
 
 from schemas import TaskOut, WhatsAppMessageOut, SendTestTaskResponse
-from whatsapp import send_template_message
-from hostfully import get_hostfully_config, fetch_properties, fetch_guests
+from whatsapp import send_template_message, send_text_message
+from hostfully import get_hostfully_config, fetch_properties, fetch_guests, fetch_leads
 from damage_cases import router as damage_router, owner_router
 from checkout_inspections import router as checkout_router, hostfully_checkout_router
 from supabase_client import get_supabase_client, get_supabase_dep
@@ -25,6 +26,22 @@ app = FastAPI(
     title="WhatsApp Task Reminder Bot",
     description="Send WhatsApp reminders to staff and track task completion.",
     version="2.0.0",
+)
+
+# ---------------------------------------------------------------------------
+# CORS
+# ---------------------------------------------------------------------------
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://ai.stayeverluxe.com",
+        "http://localhost:5173",
+        "http://localhost:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.include_router(damage_router)
@@ -51,7 +68,11 @@ def on_startup():
             logger.error("Failed to initialise Supabase client: %s", exc)
 
 
-REPLY_MAP = {
+# ---------------------------------------------------------------------------
+# Webhook reply maps
+# ---------------------------------------------------------------------------
+
+TASK_REPLY_MAP = {
     "1": "completed",
     "done": "completed",
     "2": "delayed",
@@ -59,6 +80,9 @@ REPLY_MAP = {
     "3": "issue",
     "issue": "issue",
 }
+
+CHECKOUT_VERIFICATION_REPLIES = {"1", "done", "2", "late", "3", "issue"}
+INSPECTION_REPLIES = {"1", "done", "no damage", "2", "damage", "damages"}
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +103,7 @@ def homepage():
            background: #f1f5f9; color: #1e293b; min-height: 100vh;
            display: flex; align-items: center; justify-content: center; }
     .card { background: #fff; border-radius: 12px; padding: 48px 40px;
-            box-shadow: 0 4px 24px rgba(0,0,0,.08); max-width: 520px; width: 100%; }
+            box-shadow: 0 4px 24px rgba(0,0,0,.08); max-width: 560px; width: 100%; }
     .badge { display: inline-block; background: #dcfce7; color: #16a34a;
              font-size: 12px; font-weight: 600; padding: 4px 12px;
              border-radius: 999px; margin-bottom: 20px; letter-spacing: .3px; }
@@ -101,10 +125,12 @@ def homepage():
     <p>WhatsApp task reminders and damage case management for Everluxe Real Estate And Holiday Homes — powered by FastAPI and Supabase.</p>
     <ul>
       <li><a href="/docs"><span class="icon">&#128196;</span>API Docs (Swagger UI)</a></li>
-      <li><a href="/dashboard-view"><span class="icon">&#128202;</span>Damage Cases Dashboard</a></li>
+      <li><a href="/dashboard-view"><span class="icon">&#128202;</span>Operations Dashboard</a></li>
       <li><a href="/owner-summary"><span class="icon">&#128203;</span>Owner Summary (JSON)</a></li>
+      <li><a href="/checkout-inspections/pending"><span class="icon">&#127968;</span>Pending Checkout Inspections (JSON)</a></li>
       <li><a href="/damage-cases/pending"><span class="icon">&#9203;</span>Pending Damage Cases (JSON)</a></li>
       <li><a href="/db/health"><span class="icon">&#10003;</span>Database Health Check</a></li>
+      <li><a href="/debug/routes"><span class="icon">&#128269;</span>Debug: All Routes</a></li>
     </ul>
   </div>
 </body>
@@ -115,11 +141,6 @@ def homepage():
 @app.get(
     "/db/health",
     summary="Confirm Supabase connection is working",
-    description=(
-        "Attempts a lightweight query against the `tasks` table. "
-        "Returns 200 with `{ok: true}` on success, or 503 with error details if "
-        "the connection fails or the secrets are missing."
-    ),
 )
 def db_health():
     url = os.getenv("SUPABASE_URL")
@@ -144,6 +165,58 @@ def db_health():
             status_code=503,
             detail={"ok": False, "error": str(exc)},
         )
+
+
+# ---------------------------------------------------------------------------
+# Debug endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/debug/routes", summary="List all registered routes and methods")
+def debug_routes():
+    routes = []
+    for route in app.routes:
+        if hasattr(route, "methods") and hasattr(route, "path"):
+            routes.append({
+                "path": route.path,
+                "methods": sorted(route.methods),
+                "name": getattr(route, "name", None),
+            })
+    routes.sort(key=lambda r: r["path"])
+    return {"route_count": len(routes), "routes": routes}
+
+
+@app.get("/storage/health", summary="Check Supabase Storage bucket access")
+async def storage_health():
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    if not url or not key:
+        return {
+            "ok": False,
+            "message": "SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is not set.",
+        }
+    try:
+        import httpx
+        storage_url = f"{url.rstrip('/')}/storage/v1/bucket"
+        headers = {"Authorization": f"Bearer {key}", "apikey": key}
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(storage_url, headers=headers)
+        if resp.status_code == 200:
+            buckets = [b.get("name") for b in resp.json() if isinstance(b, dict)]
+            has_photos = "damage-photos" in buckets
+            return {
+                "ok": True,
+                "buckets": buckets,
+                "damage_photos_bucket_exists": has_photos,
+                "message": "Storage accessible" if has_photos else "damage-photos bucket not found — create it in Supabase Storage.",
+            }
+        return {
+            "ok": False,
+            "status_code": resp.status_code,
+            "message": f"Storage API returned {resp.status_code}",
+        }
+    except Exception as exc:
+        logger.error("Storage health check failed: %s", exc)
+        return {"ok": False, "message": str(exc)}
 
 
 # ---------------------------------------------------------------------------
@@ -191,14 +264,169 @@ async def receive_webhook(request: Request, sb: Client = Depends(get_supabase_de
                 messages = value.get("messages", [])
                 for msg in messages:
                     if msg.get("type") != "text":
+                        logger.info("Non-text message type '%s' — skipped", msg.get("type"))
                         continue
 
                     from_number = msg.get("from", "")
                     text = msg.get("text", {}).get("body", "").strip().lower()
                     raw_payload_str = json.dumps(body)
-
-                    new_status = REPLY_MAP.get(text)
+                    now_str = datetime.utcnow().isoformat()
                     task_id = None
+
+                    # ----------------------------------------------------------
+                    # Priority 1: Check for an open checkout inspection assigned
+                    # to this number and awaiting a reply.
+                    # ----------------------------------------------------------
+                    checkout_resp = (
+                        sb.table("checkout_inspections")
+                        .select("*")
+                        .eq("assigned_ops_number", from_number)
+                        .in_("status", [
+                            "checkout_verification_pending",
+                            "late_checkout",
+                            "inspection_pending",
+                        ])
+                        .order("created_at", desc=True)
+                        .limit(1)
+                        .execute()
+                    )
+
+                    if checkout_resp.data:
+                        insp = checkout_resp.data[0]
+                        insp_id = insp["id"]
+                        logger.info(
+                            "Routing reply '%s' from %s to checkout inspection %d (status=%s)",
+                            text, from_number, insp_id, insp["status"],
+                        )
+
+                        if insp["status"] == "inspection_pending":
+                            # Reply 1 = no damage → closed, Reply 2 = damage found
+                            if text in ("1", "done", "no damage"):
+                                sb.table("checkout_inspections").update({
+                                    "status": "no_damage_reported",
+                                    "updated_at": now_str,
+                                }).eq("id", insp_id).execute()
+                                sb.table("checkout_inspections").update({
+                                    "status": "closed",
+                                    "updated_at": now_str,
+                                    "last_message_sent_at": now_str,
+                                }).eq("id", insp_id).execute()
+                                try:
+                                    await send_text_message(
+                                        from_number,
+                                        f"No damage recorded for {insp['unit_name']}. Checkout inspection closed.",
+                                    )
+                                except Exception as exc:
+                                    logger.warning("Could not send no-damage reply: %s", exc)
+                                logger.info("Inspection %d → closed (no damage) via webhook", insp_id)
+
+                            elif text in ("2", "damage", "damages"):
+                                sb.table("checkout_inspections").update({
+                                    "status": "damage_reported",
+                                    "updated_at": now_str,
+                                    "last_message_sent_at": now_str,
+                                }).eq("id", insp_id).execute()
+                                try:
+                                    await send_text_message(
+                                        from_number,
+                                        f"*Damage noted* — Unit: {insp['unit_name']}\n"
+                                        f"Please create a damage case via the dashboard or:\n"
+                                        f"POST /checkout-inspections/{insp_id}/damage-found",
+                                    )
+                                except Exception as exc:
+                                    logger.warning("Could not send damage reply: %s", exc)
+                                logger.info("Inspection %d → damage_reported via webhook", insp_id)
+                            else:
+                                logger.info(
+                                    "Unrecognised reply '%s' for inspection_pending %d — expected 1 or 2",
+                                    text, insp_id,
+                                )
+
+                        else:
+                            # checkout_verification_pending or late_checkout
+                            # Reply 1 = checked out → inspection_pending
+                            # Reply 2 = still inside → late_checkout
+                            # Reply 3 = issue
+                            if text in ("1", "done"):
+                                sb.table("checkout_inspections").update({
+                                    "status": "inspection_pending",
+                                    "actual_checkout_at": now_str,
+                                    "updated_at": now_str,
+                                    "last_message_sent_at": now_str,
+                                }).eq("id", insp_id).execute()
+                                try:
+                                    await send_text_message(
+                                        from_number,
+                                        f"*Checkout Confirmed — Please Inspect*\n"
+                                        f"Unit: {insp['unit_name']}\n"
+                                        f"Guest: {insp.get('guest_name') or '—'} has checked out.\n\n"
+                                        f"Please inspect the unit and reply:\n"
+                                        f"1 No damage found\n"
+                                        f"2 Damage found",
+                                    )
+                                except Exception as exc:
+                                    logger.warning("Could not send inspection prompt: %s", exc)
+                                logger.info("Inspection %d → inspection_pending via webhook", insp_id)
+
+                            elif text in ("2", "late"):
+                                followup_at = (datetime.utcnow() + timedelta(hours=2)).isoformat()
+                                sb.table("checkout_inspections").update({
+                                    "status": "late_checkout",
+                                    "late_checkout_followup_at": followup_at,
+                                    "updated_at": now_str,
+                                    "last_message_sent_at": now_str,
+                                }).eq("id", insp_id).execute()
+                                try:
+                                    await send_text_message(
+                                        from_number,
+                                        f"*Late Checkout* — Unit: {insp['unit_name']}\n"
+                                        f"Guest: {insp.get('guest_name') or '—'}\n"
+                                        f"Follow-up reminder set for 2 hours.",
+                                    )
+                                except Exception as exc:
+                                    logger.warning("Could not send late checkout reply: %s", exc)
+                                logger.info("Inspection %d → late_checkout via webhook", insp_id)
+
+                            elif text in ("3", "issue"):
+                                sb.table("checkout_inspections").update({
+                                    "status": "issue",
+                                    "updated_at": now_str,
+                                    "last_message_sent_at": now_str,
+                                }).eq("id", insp_id).execute()
+                                owner_number = os.getenv("OWNER_WHATSAPP_NUMBER")
+                                if owner_number and owner_number != from_number:
+                                    try:
+                                        await send_text_message(
+                                            owner_number,
+                                            f"*Checkout Issue*\n"
+                                            f"Unit: {insp['unit_name']}\n"
+                                            f"Guest: {insp.get('guest_name') or '—'}\n"
+                                            f"Operations has reported an issue. Please follow up.",
+                                        )
+                                    except Exception as exc:
+                                        logger.warning("Could not notify owner for checkout issue: %s", exc)
+                                logger.info("Inspection %d → issue via webhook", insp_id)
+                            else:
+                                logger.info(
+                                    "Unrecognised checkout reply '%s' from %s for inspection %d",
+                                    text, from_number, insp_id,
+                                )
+
+                        # Log the inbound message linked to no task_id (it's a checkout inspection reply)
+                        sb.table("whatsapp_messages").insert({
+                            "task_id": None,
+                            "staff_whatsapp_number": from_number,
+                            "direction": "inbound",
+                            "message_text": text,
+                            "raw_payload": raw_payload_str,
+                            "created_at": now_str,
+                        }).execute()
+                        continue  # Do not fall through to task routing
+
+                    # ----------------------------------------------------------
+                    # Priority 2: Task reply routing (existing behaviour)
+                    # ----------------------------------------------------------
+                    new_status = TASK_REPLY_MAP.get(text)
 
                     if new_status:
                         task_resp = (
@@ -215,7 +443,7 @@ async def receive_webhook(request: Request, sb: Client = Depends(get_supabase_de
                             task_id = task["id"]
                             sb.table("tasks").update({
                                 "status": new_status,
-                                "updated_at": datetime.utcnow().isoformat(),
+                                "updated_at": now_str,
                             }).eq("id", task_id).execute()
                             logger.info(
                                 "Task %d updated to '%s' by %s",
@@ -225,7 +453,8 @@ async def receive_webhook(request: Request, sb: Client = Depends(get_supabase_de
                             logger.info("No open task found for %s to update", from_number)
                     else:
                         logger.info(
-                            "Unrecognised reply '%s' from %s — no status update", text, from_number,
+                            "Unrecognised reply '%s' from %s — no checkout inspection or task to update",
+                            text, from_number,
                         )
 
                     sb.table("whatsapp_messages").insert({
@@ -234,7 +463,7 @@ async def receive_webhook(request: Request, sb: Client = Depends(get_supabase_de
                         "direction": "inbound",
                         "message_text": text,
                         "raw_payload": raw_payload_str,
-                        "created_at": datetime.utcnow().isoformat(),
+                        "created_at": now_str,
                     }).execute()
 
     except Exception as exc:
@@ -344,7 +573,7 @@ def delete_task(task_id: int, sb: Client = Depends(get_supabase_dep)):
 # Hostfully endpoints
 # ---------------------------------------------------------------------------
 
-@app.get("/hostfully/test", summary="Test Hostfully API connectivity")
+@app.get("/hostfully/test", summary="Test Hostfully API connectivity (properties)")
 async def hostfully_test():
     try:
         api_key, agency_uid, base_url = get_hostfully_config()
@@ -367,6 +596,112 @@ async def hostfully_test():
         "success": success,
         "status_code": status_code,
         "first_3_properties": property_names,
+    }
+
+
+@app.get("/hostfully/leads-test", summary="Test Hostfully leads/reservations endpoint")
+async def hostfully_leads_test():
+    """
+    Verifies that the correct Hostfully leads/reservations endpoint is reachable.
+    Uses /leads (not /bookings). Returns the first 3 records summarised and
+    the available field names from the first record. Never exposes the API key.
+    """
+    try:
+        api_key, agency_uid, base_url = get_hostfully_config()
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    import httpx
+    url = f"{base_url}/leads"
+    params = {"agencyUid": agency_uid, "limit": 3, "offset": 0}
+    safe_url = f"{url}?limit=3&offset=0&agencyUid=<hidden>"
+
+    logger.info("Hostfully leads-test: calling %s", safe_url)
+
+    headers = {
+        "X-HOSTFULLY-APIKEY": api_key,
+        "Accept": "application/json",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(url, headers=headers, params=params)
+    except Exception as exc:
+        logger.error("Hostfully leads-test request failed: %s", exc)
+        raise HTTPException(status_code=502, detail=f"Request failed: {exc}")
+
+    ct = response.headers.get("content-type", "")
+    try:
+        data = response.json() if ct.startswith("application/json") else {}
+    except Exception:
+        data = {}
+
+    success = response.status_code == 200
+
+    if not success:
+        logger.warning("Hostfully leads-test failed: status=%d body=%s", response.status_code, data)
+        return {
+            "success": False,
+            "status_code": response.status_code,
+            "raw_url_called": safe_url,
+            "error_body": data,
+        }
+
+    # Extract leads list from various possible response shapes
+    leads = []
+    if isinstance(data, list):
+        leads = data
+    else:
+        for key in ("leads", "bookings", "reservations", "results", "items"):
+            if key in data and isinstance(data[key], list):
+                leads = data[key]
+                break
+
+    total = (
+        data.get("total") or data.get("count") or data.get("totalCount")
+        if isinstance(data, dict) else None
+    )
+
+    field_names = list(leads[0].keys()) if leads else []
+    summaries = []
+    for lead in leads[:3]:
+        uid = lead.get("uid") or lead.get("id")
+        prop = lead.get("propertyUid") or lead.get("propertyId")
+        checkin = lead.get("checkInDate") or lead.get("checkinDate") or lead.get("startDate")
+        checkout = lead.get("checkOutDate") or lead.get("checkoutDate") or lead.get("endDate")
+        first = lead.get("guestFirstName") or lead.get("firstName") or ""
+        last = lead.get("guestLastName") or lead.get("lastName") or ""
+        guest = f"{first} {last}".strip() or lead.get("guestName") or "—"
+        status = lead.get("status") or "—"
+        summaries.append({
+            "uid": uid,
+            "property_uid": prop,
+            "guest": guest,
+            "check_in": checkin,
+            "check_out": checkout,
+            "status": status,
+        })
+
+    # Redact sensitive fields from the raw first record before returning
+    raw_first = {}
+    if leads:
+        raw_first = dict(leads[0])
+        for sensitive_key in ("agencyUid", "externalBookingId"):
+            if sensitive_key in raw_first:
+                raw_first[sensitive_key] = "<redacted>"
+
+    logger.info(
+        "Hostfully leads-test success: %d leads returned, total=%s",
+        len(leads), total,
+    )
+    return {
+        "success": True,
+        "status_code": response.status_code,
+        "raw_url_called": safe_url,
+        "total_records": total,
+        "records_in_response": len(leads),
+        "first_3_summaries": summaries,
+        "available_field_names": field_names,
+        "first_record_raw": raw_first,
     }
 
 

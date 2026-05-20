@@ -1,411 +1,309 @@
-# WhatsApp Task Reminder Bot
+# Holiday Homes Ops Bot
 
-A FastAPI backend that sends WhatsApp reminders to holiday-home staff for cleaning, maintenance, inspection, and check-in tasks. Staff reply with a number to update the task status.
+WhatsApp task reminders, damage case management, and checkout inspection workflow for **Everluxe Real Estate And Holiday Homes**.
 
----
-
-## How It Works
-
-1. You call `POST /send-test-task` to create a task and send a WhatsApp template message.
-2. The staff member receives the message and replies: `1` (done), `2` (delayed), or `3` (issue).
-3. The webhook receives the reply and updates the task status in Supabase PostgreSQL.
+- **Backend:** https://task-bot-manager.replit.app
+- **Frontend (Netlify):** https://ai.stayeverluxe.com
+- **API Docs:** https://task-bot-manager.replit.app/docs
 
 ---
 
-## Running on Replit
+## Full Flow
 
-### 1. Create a Supabase Project
+```
+Hostfully PMS  →  POST /hostfully/sync-checkouts
+                    │
+                    ├─ Rebooking detected?
+                    │     Yes → status: rebooked_extension_detected
+                    │           Notify ops: "Inspection moved to new checkout date"
+                    │
+                    └─ Normal checkout
+                          status: checkout_verification_pending
+                          WhatsApp → ops: "Reply 1/2/3"
 
-1. Go to [supabase.com](https://supabase.com) and create a free account.
-2. Click **New project**, give it a name (e.g. `everluxe-bot`), and set a database password. Copy the password somewhere safe.
-3. Wait for the project to provision (~1 minute).
+Staff WhatsApp reply  →  POST /webhooks/whatsapp
+                            │
+                            ├─ Open checkout_inspection for sender?
+                            │     1 → inspection_pending  (guest left, go inspect)
+                            │     2 → late_checkout       (guest still inside)
+                            │     3 → issue               (notify owner)
+                            │
+                            └─ inspection_pending reply?
+                                  1 → no_damage_reported → closed
+                                  2 → damage_reported
+                                        POST /checkout-inspections/{id}/damage-found
+                                          → creates damage_case, notifies GM
 
-### 2. Create the Database Tables
+Damage case workflow:
+  quote_pending → tenant_approval_pending → gm_action_pending
+  → placement_proof_pending → accounts_refund_pending → closed
+```
 
-1. In your Supabase project, open **SQL Editor** (left sidebar).
-2. Paste the entire contents of `schema.sql` (in this folder) into the editor.
-3. Click **Run**. All 5 tables and indexes will be created.
+---
 
-### 3. Get Your Supabase Credentials
+## Required Environment Variables
 
-In your Supabase project, go to **Project Settings → API**:
+Set all of these in **Replit Secrets** before running:
 
-| What | Where |
+| Variable | Description |
 |---|---|
-| **Project URL** | Under "Project URL" — looks like `https://xxxx.supabase.co` |
-| **Service Role Key** | Under "Project API keys" → `service_role` (hidden by default — click to reveal) |
+| `SUPABASE_URL` | Your Supabase project URL |
+| `SUPABASE_SERVICE_ROLE_KEY` | Supabase service role key (not the anon key) |
+| `WHATSAPP_ACCESS_TOKEN` | Meta WhatsApp Cloud API access token |
+| `WHATSAPP_PHONE_NUMBER_ID` | Meta phone number ID |
+| `WHATSAPP_VERIFY_TOKEN` | Token for Meta webhook verification |
+| `WHATSAPP_TEMPLATE_NAME` | Approved template name (e.g. `task_reminder`) |
+| `WHATSAPP_TEMPLATE_LANGUAGE` | Template language code (e.g. `en_US`) |
+| `OWNER_WHATSAPP_NUMBER` | Owner's number for escalations (no `+`, e.g. `971501234567`) |
+| `DEFAULT_OPS_WHATSAPP_NUMBER` | Default ops number for checkout inspections |
+| `HOSTFULLY_API_KEY` | Hostfully API key |
+| `HOSTFULLY_AGENCY_UID` | Hostfully agency UID |
+| `HOSTFULLY_BASE_URL` | Hostfully API base URL — use `https://api.hostfully.com/api/v3` |
+| `CRON_SECRET` | Secret for protecting cron endpoints (optional but strongly recommended) |
+| `TEST_WHATSAPP_TO` | Phone number for `/send-test-task` smoke tests |
 
-> Use the **service_role** key, not the `anon` key. The service role key bypasses Row Level Security and is required for server-side operations.
+**Frontend (Netlify) variable:**
 
-### 4. Set Replit Secrets
-
-Go to **Tools → Secrets** in your Replit workspace and add:
-
-| Secret name | Value |
+| Variable | Description |
 |---|---|
-| `SUPABASE_URL` | Your Supabase project URL (e.g. `https://xxxx.supabase.co`) |
-| `SUPABASE_SERVICE_ROLE_KEY` | Your Supabase service role key |
-| `WHATSAPP_ACCESS_TOKEN` | Your Meta Cloud API permanent access token |
-| `WHATSAPP_PHONE_NUMBER_ID` | Your WhatsApp Business phone number ID |
-| `WHATSAPP_VERIFY_TOKEN` | Any random string you choose (e.g. `my_secret_token_123`) |
-| `TEST_WHATSAPP_TO` | A WhatsApp number to receive test messages (e.g. `447911123456`) |
-| `OWNER_WHATSAPP_NUMBER` | Owner's WhatsApp number for overdue escalations and summaries |
-| `HOSTFULLY_API_KEY` | Your Hostfully API key (optional) |
-| `HOSTFULLY_AGENCY_UID` | Your Hostfully agency UID (optional) |
+| `VITE_API_BASE_URL` | Backend URL, e.g. `https://task-bot-manager.replit.app` |
 
-> **Phone number format:** Include country code, no `+`, no spaces. Example: `447911123456`
+---
 
-### 5. Test the Database Connection
+## Cron Endpoints
 
-After adding the secrets and restarting the server, call:
+Call these on a schedule (Replit cron, GitHub Actions, EasyCron, etc.):
+
+| Endpoint | Recommended frequency | Purpose |
+|---|---|---|
+| `POST /damage-cases/check-overdue` | Every hour | Escalate overdue GM-action cases (6h throttle per case) |
+| `POST /checkout-inspections/check-due` | Every 30 minutes | Remind ops of due/late checkouts (3h throttle per record) |
+
+Both require the `X-CRON-SECRET` header **if** `CRON_SECRET` is configured:
 
 ```bash
-curl https://<your-repl-domain>/db/health
+curl -X POST https://task-bot-manager.replit.app/checkout-inspections/check-due \
+  -H "X-CRON-SECRET: your_cron_secret"
 ```
 
-Expected response when working:
-```json
-{ "ok": true, "supabase_url": "https://xxxx.supabase.co" }
-```
-
-If you see `503`, the secrets are missing or incorrect — double-check `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`.
-
-### 2. Start the Server
-
-The workflow is pre-configured. Click **Run** or start the `WhatsApp Bot` workflow. The server starts on port 8000.
-
-### 3. Set the Webhook URL in Meta
-
-In the [Meta Developer Console](https://developers.facebook.com/), go to your app → **WhatsApp → Configuration → Webhooks**:
-
-- **Callback URL:** `https://<your-repl-domain>/webhooks/whatsapp`
-- **Verify token:** The same value you set as `WHATSAPP_VERIFY_TOKEN`
-
-Subscribe to the **messages** field.
-
-> Your Repl's public domain looks like `https://your-project-name.your-username.repl.co`
+If `CRON_SECRET` is not set the endpoints are open (not recommended for production).
 
 ---
 
 ## API Endpoints
 
-### `GET /`
-Health check.
+### Health & Debug
 
-```json
-{ "status": "ok", "service": "WhatsApp Task Reminder Bot" }
-```
-
----
-
-### `GET /webhooks/whatsapp`
-Meta webhook verification. Called automatically by Meta when you save the webhook URL.
-
-**Query params (sent by Meta):**
-- `hub.mode`
-- `hub.verify_token`
-- `hub.challenge`
-
-Returns the challenge as plain text if the token matches, otherwise `403`.
-
----
-
-### `POST /webhooks/whatsapp`
-Receives incoming WhatsApp messages from Meta.
-
-- Logs the full payload.
-- Parses reply text:
-  - `1` or `done` → **completed**
-  - `2` or `delayed` → **delayed**
-  - `3` or `issue` → **issue**
-- Saves the message to the database.
-- Updates the most recent open task for that WhatsApp number.
-
----
-
-### `GET /db/health`
-Confirms the Supabase connection is working. Returns `200 {"ok": true}` or `503` with error details.
-
----
-
-### `POST /send-test-task`
-Creates a test task in Supabase and sends a WhatsApp template message to `TEST_WHATSAPP_TO`.
-
-**Template:** `hello_world` with variables:
-1. Staff name
-2. Property name
-3. Task description
-4. Due time
-
-> Make sure your `hello_world` template is approved in Meta Business Manager.
-
----
-
-### `GET /tasks`
-Returns all tasks with their current status, newest first.
-
----
-
-### `POST /tasks/{task_id}/close`
-Marks a task as `closed`/cancelled. Useful for cancelling a task without deleting it.
-
----
-
-### `DELETE /tasks/{task_id}`
-Permanently deletes a single task by ID.
-
----
-
-### `POST /tasks/clear-test`
-Deletes all tasks where `property_name = "Sunset Villa"`. Use this to wipe test data created by `/send-test-task` without touching real tasks.
-
-```bash
-curl -X POST https://<your-repl-domain>/tasks/clear-test
-```
-
----
-
-## Damage Case Workflow
-
-### Overview
-
-Operations discovers damage in a unit → GM is chased for a quote → Reservations shares charges with tenant → Tenant approves → GM purchases and places replacement → Photo proof required → Accounts processes refund → Case closed.
-
-### Workflow Order & Validation
-
-Steps must be called in strict order. Calling a step out of sequence returns `HTTP 400` with the current and required status:
-
-```json
-{
-  "error": "Invalid workflow step — case is not in the required status.",
-  "current_status": "quote_pending",
-  "required_status": "tenant_approval_pending"
-}
-```
-
-| Step | Endpoint | Required status | Extra condition |
-|---|---|---|---|
-| 1 | `POST /damage-cases` | — | Creates case, status → `quote_pending` |
-| 2 | `POST /{id}/quote` | `quote_pending` | — |
-| 3 | `POST /{id}/tenant-approved` | `tenant_approval_pending` | `refund_amount` must not be null |
-| 4 | `POST /{id}/gm-purchased` | `gm_action_pending` | — |
-| 5 | `POST /{id}/photo` | any status | Sets `photo_proof_received = true` |
-| 6 | `POST /{id}/replacement-placed` | `placement_proof_pending` | `photo_proof_received` must be `true` |
-| 7 | `POST /{id}/refund-completed` | `accounts_refund_pending` | — |
-
-`POST /{id}/cancel` can be called at any status.
-
-### Deadline Rules (`due_at`)
-
-`due_at` is set automatically on every status transition — it is not accepted as a request body field. Closed and cancelled cases always have `due_at = null`.
-
-| Status entered | Deadline | Set by |
+| Method | Path | Description |
 |---|---|---|
-| `quote_pending` | **now + 24 h** | Case creation |
-| `tenant_approval_pending` | **now + 24 h** | `POST /{id}/quote` |
-| `gm_action_pending` | **now + 46 h** | `POST /{id}/tenant-approved` |
-| `placement_proof_pending` | **now + 24 h** | `POST /{id}/gm-purchased` |
-| `accounts_refund_pending` | **now + 24 h** | `POST /{id}/replacement-placed` |
-| `closed` / `cancelled` | **null** | `refund-completed` / `cancel` |
+| GET | `/` | Homepage with navigation links |
+| GET | `/db/health` | Supabase connection check |
+| GET | `/debug/routes` | All registered routes and methods |
+| GET | `/storage/health` | Supabase Storage bucket check |
 
-The dashboard "Due In / Overdue" column shows remaining time in green or elapsed time in red (⚠). An "Overdue" stat card counts all breached deadlines at a glance.
+### Hostfully
 
-### Overdue Escalation
+| Method | Path | Description |
+|---|---|---|
+| GET | `/hostfully/test` | Test properties API connectivity |
+| GET | `/hostfully/leads-test` | Test leads/reservations API — shows raw first record for debugging |
+| GET | `/hostfully/properties` | List all properties |
+| GET | `/hostfully/guests` | List first 10 guests |
+| POST | `/hostfully/sync-checkouts` | Sync checkouts, detect rebookings, send ops messages |
 
-`POST /damage-cases/check-overdue` scans every `gm_action_pending` case whose `due_at` has passed and sends a WhatsApp escalation to three recipients:
+### Checkout Inspections
 
-| Recipient | Source |
-|---|---|
-| GM | `gm_number` on the case |
-| Ops Supervisor | `ops_supervisor_number` on the case |
-| Owner | `OWNER_WHATSAPP_NUMBER` environment secret |
+| Method | Path | Description |
+|---|---|---|
+| GET | `/checkout-inspections` | List all inspections |
+| GET | `/checkout-inspections/pending` | List pending (verification / late / inspection) |
+| GET | `/checkout-inspections/{id}` | Get single inspection |
+| POST | `/checkout-inspections/{id}/reply` | Handle ops reply (1/2/3) |
+| POST | `/checkout-inspections/{id}/no-damage` | Mark no damage → close |
+| POST | `/checkout-inspections/{id}/damage-found` | Create linked damage case + notify GM |
+| POST | `/checkout-inspections/check-due` | Send due reminders (3h throttle, X-CRON-SECRET) |
+| DELETE | `/checkout-inspections/clear-test-data` | Delete records with null `scheduled_checkout_at` |
 
-The message includes the case ID, unit, guest, damage amount, and how many hours overdue it is. Each notification is recorded as a `DamageEvent` (type `overdue_escalation`) in the audit trail.
+### Damage Cases
 
-The endpoint is designed to be called **hourly** from an external cron job or triggered manually from `/docs`. Each recipient receives **at most one overdue escalation per case every 6 hours** — calling it more frequently will not cause spam.
+| Method | Path | Description |
+|---|---|---|
+| GET | `/damage-cases` | List all damage cases |
+| GET | `/damage-cases/pending` | List non-closed cases |
+| POST | `/damage-cases` | Create new damage case |
+| POST | `/damage-cases/check-overdue` | Escalate overdue GM-action cases |
+| GET | `/damage-cases/{id}` | Get case with events + photos |
+| POST | `/damage-cases/{id}/quote` | Submit GM quote |
+| POST | `/damage-cases/{id}/tenant-approved` | Tenant approves deduction |
+| POST | `/damage-cases/{id}/tenant-rejected` | Tenant rejects |
+| POST | `/damage-cases/{id}/gm-purchased` | GM confirms replacement purchased |
+| POST | `/damage-cases/{id}/photo` | Upload placement proof photo |
+| POST | `/damage-cases/{id}/replacement-placed` | Confirm replacement placed |
+| POST | `/damage-cases/{id}/refund-completed` | Mark refund completed |
+| POST | `/damage-cases/{id}/close` | Close/cancel case |
 
-```
-POST /damage-cases/check-overdue
-```
+### Tasks & Webhooks
 
-Response:
-```json
-{
-  "checked_status": "gm_action_pending",
-  "overdue_count": 2,
-  "notified": [
-    {
-      "case_id": 5,
-      "unit_name": "Villa A",
-      "guest_name": "John Smith",
-      "hours_overdue": 3.2,
-      "notified": [
-        { "role": "gm", "number": "971500000001" },
-        { "role": "ops_supervisor", "number": "971500000002" },
-        { "role": "owner", "number": "971552211129" }
-      ]
-    }
-  ],
-  "skipped_due_to_throttle": 3,
-  "errors": []
-}
-```
+| Method | Path | Description |
+|---|---|---|
+| GET | `/tasks` | List all tasks |
+| POST | `/send-test-task` | Create test task + send WhatsApp |
+| GET | `/webhooks/whatsapp` | Meta webhook verification (GET) |
+| POST | `/webhooks/whatsapp` | Receive inbound WhatsApp replies |
 
-**Throttle logic:** before sending to each recipient, the endpoint queries `damage_events` for the most recent `overdue_escalation` event for that case + recipient number. If one was sent within the last 6 hours it is skipped and counted in `skipped_due_to_throttle`. The check is per-recipient, so a new GM number added mid-escalation will still receive their first notification.
+### Dashboard
 
-### Statuses
+| Method | Path | Description |
+|---|---|---|
+| GET | `/dashboard-view` | HTML dashboard (damage cases + checkout inspections) |
+| GET | `/owner-summary` | High-level owner metrics (JSON) |
+
+---
+
+## Checkout Inspection Statuses
 
 | Status | Meaning |
 |---|---|
-| `quote_pending` | Waiting on GM to provide damage quote |
-| `tenant_approval_pending` | Waiting on Reservations/Ops to confirm tenant approved |
-| `gm_action_pending` | Tenant approved — GM + Ops must purchase and place item |
-| `placement_proof_pending` | Waiting on GM to send photo proof of placement |
-| `accounts_refund_pending` | Waiting on Accounts to process refund |
-| `closed` | Refund complete |
-| `cancelled` | Case cancelled |
-
-### Endpoints
-
-**`POST /damage-cases`** — Create a new damage case. Required fields: `unit_name` or `hostfully_property_uid`, `guest_name`, `damage_description`, `deposit_amount`, `gm_number`, `ops_supervisor_number`, `reservations_number`, `accounts_number`. On creation, a WhatsApp message is sent to the GM asking for a quote.
-
-```json
-{
-  "unit_name": "Sunset Villa",
-  "guest_name": "John Smith",
-  "guest_phone": "971501234567",
-  "damage_description": "Broken TV in master bedroom",
-  "deposit_amount": 2000,
-  "gm_number": "971501234567",
-  "ops_supervisor_number": "971507654321",
-  "reservations_number": "971509876543",
-  "accounts_number": "971502345678"
-}
-```
-
-**`GET /damage-cases`** — All cases, newest first.
-
-**`GET /damage-cases/pending`** — Only non-closed, non-cancelled cases.
-
-**`GET /damage-cases/{id}`** — Single case with full event log and photos.
-
-**`POST /damage-cases/{id}/quote`** — Submit damage quote. Calculates `refund = deposit - damage - other_charges`. Notifies Reservations.
-```json
-{ "damage_amount": 500, "other_charges": 100, "notes": "TV replacement" }
-```
-
-**`POST /damage-cases/{id}/tenant-approved`** — Tenant agreed to charges. Notifies GM and Ops Supervisor.
-
-**`POST /damage-cases/{id}/gm-purchased`** — GM confirms item purchased. Asks GM for photo proof.
-
-**`POST /damage-cases/{id}/photo`** — Upload photo proof (URL or WhatsApp media ID).
-```json
-{ "photo_url_or_media_id": "https://...", "photo_type": "placement_proof" }
-```
-
-**`POST /damage-cases/{id}/replacement-placed`** — Confirm item placed. Requires photo proof. Notifies Accounts with full financial summary.
-
-**`POST /damage-cases/{id}/refund-completed`** — Close case after refund is done.
-
-**`POST /damage-cases/{id}/cancel`** — Cancel the case.
-
-**`GET /owner-summary`** — JSON summary: total pending, overdue, broken down by waiting_on, missing photos, closed today, top 10 oldest open cases.
-
-**`POST /send-owner-summary`** — Builds the same summary and sends it as a WhatsApp message to `OWNER_WHATSAPP_NUMBER`. Add that secret in **Tools → Secrets** before calling this endpoint. Returns the summary data plus the WhatsApp API result.
-
-Example message sent to owner:
-```
-Damage Cases Summary
-━━━━━━━━━━━━━━━━━━
-📋 Total pending: 3
-⏰ Overdue: 1
-👤 Waiting on GM: 1
-🔧 Waiting on Ops: 2
-🏠 Waiting on Reservations: 0
-💰 Waiting on Accounts: 1
-📷 Missing photo proof: 2
-━━━━━━━━━━━━━━━━━━
-Top 5 Oldest Open Cases:
-  1. #4 Sunset Villa – John Smith (GM Action Pending, waiting: GM + Ops, age: 5d)
-  ...
-```
-
-**`GET /dashboard-view`** — HTML dashboard grouped by status with all case details. Open directly in a browser.
+| `checkout_verification_pending` | Waiting for ops to confirm guest has left |
+| `rebooked_extension_detected` | Extension/rebooking detected — no inspection needed today |
+| `late_checkout` | Guest still inside, follow-up pending |
+| `inspection_pending` | Guest left, ops instructed to inspect |
+| `no_damage_reported` | Inspection complete, no damage found |
+| `damage_reported` | Damage found, damage case being created |
+| `issue` | Issue reported, owner/supervisor notified |
+| `closed` | Fully resolved |
 
 ---
 
-## Hostfully Integration
+## Rebooking / Extension Detection
 
-### Setup
+Everluxe does not extend existing bookings. When a guest extends, a **new booking** is created in Hostfully. The bot auto-detects this pattern at sync time:
 
-Add these three secrets in **Tools → Secrets**:
-
-| Secret | Value |
-|---|---|
-| `HOSTFULLY_API_KEY` | Your Hostfully API key |
-| `HOSTFULLY_AGENCY_UID` | Your agency UID from Hostfully |
-| `HOSTFULLY_BASE_URL` | API base URL (e.g. `https://api.hostfully.com/v2`) |
-
-### Endpoints
-
-**`GET /hostfully/test`**
-Quick connectivity check. Returns `success: true/false`, the HTTP status code from Hostfully, and the first 3 property names if the connection succeeds.
-
-**`GET /hostfully/properties`**
-Returns all properties with UID, name, address, city, and active/status fields.
-
-**`GET /hostfully/guests`**
-Returns the first 10 guests with UID, name, email, and phone.
-
-> The API key is never returned in any response — it is only sent as a request header to Hostfully.
+1. For each checkout due today/tomorrow, fetch leads for the same property with check-in within 24 hours of the old checkout date.
+2. A rebooking match requires: same `propertyUid` **and** at least one of: same guest UID / same phone / same email / same guest name.
+3. **Match found** → set `status = rebooked_extension_detected`, store `linked_new_booking_uid`, update `scheduled_checkout_at` to the new checkout date, send informational WhatsApp to ops.
+4. **No match** → set `status = checkout_verification_pending`, send ops verification message.
 
 ---
 
-## WhatsApp Template Setup
+## WhatsApp Reply Routing (Webhook Priority)
 
-Before using `/send-test-task`, you must create and get approved a template named `hello_world` in [Meta Business Manager](https://business.facebook.com/) → **Account Tools → Message Templates**.
+Incoming replies are routed in this priority order:
 
-**Suggested template body:**
-```
-Hi {{1}}, you have a task at {{2}}: {{3}}. Please complete by {{4}}.
+1. **Checkout inspection** — sender has an open inspection (`checkout_verification_pending`, `late_checkout`, or `inspection_pending`):
+   - `checkout_verification_pending` / `late_checkout`: `1` = checked out → inspection_pending, `2` = late checkout, `3` = issue
+   - `inspection_pending`: `1` = no damage → closed, `2` = damage found → damage_reported
+2. **Task reply** — sender has an open task: `1`/`done` = completed, `2`/`delayed` = delayed, `3`/`issue` = issue
+3. **Unrecognised** — logged, no crash, no status change
 
-Reply with:
-1 - Done
-2 - Delayed
-3 - Issue
-```
+This ensures a reply intended for a checkout inspection never accidentally updates a damage case task.
 
 ---
 
-## Database
+## Hostfully API Notes
 
-All data is stored in **Supabase PostgreSQL**. There is no local SQLite file.
-
-Run `schema.sql` once in the Supabase SQL Editor to create all tables and indexes:
-
-- `tasks` — staff task records and status
-- `whatsapp_messages` — inbound/outbound message log
-- `damage_cases` — full damage case workflow
-- `damage_events` — audit log per damage case transition
-- `damage_photos` — photo proof uploads
-- `checkout_inspections` — Hostfully checkout inspection workflow
+- Uses Hostfully **v3** at `https://api.hostfully.com/api/v3/leads`.
+- Do **not** use `/bookings` — it returns `"Unknown api: bookings"`.
+- Guest info is nested in `guestInformation` (v3) rather than flat top-level fields (v2).
+- Date fields: `checkInZonedDateTime` / `checkOutZonedDateTime` (ISO 8601 with timezone offset).
+- Server-side date filtering may not be supported in v3 — the bot applies **client-side** filtering to only process checkouts for today and tomorrow.
+- Use `/hostfully/leads-test` to inspect the raw first record and confirm field names are as expected.
 
 ---
 
-## Local Development (outside Replit)
+## Supabase Storage
+
+The `damage-photos` bucket stores photo-proof uploads for damage cases. Create it manually in the Supabase dashboard under **Storage**. Verify with `GET /storage/health`.
+
+---
+
+## How to Test End-to-End
 
 ```bash
-cd artifacts/whatsapp-bot
-python -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
+BASE=https://task-bot-manager.replit.app
 
-# Copy and fill in all required variables
-cp .env.example .env
-# edit .env with your real values
+# 1. Verify secrets + DB
+curl $BASE/db/health
 
-uvicorn main:app --reload --port 8000
+# 2. Verify Hostfully properties API
+curl $BASE/hostfully/test
+
+# 3. Verify leads/reservations API (v3)
+curl $BASE/hostfully/leads-test
+# Expect: success=true, guest name populated, checkOut date present
+
+# 4. Run checkout sync
+curl -X POST $BASE/hostfully/sync-checkouts
+
+# 5. Check what was created
+curl $BASE/checkout-inspections
+curl $BASE/checkout-inspections/pending
+
+# 6. Simulate ops reply
+curl -X POST $BASE/checkout-inspections/1/reply \
+  -H "Content-Type: application/json" \
+  -d '{"reply": "1"}'
+
+# 7. Test damage case workflow
+curl -X POST $BASE/damage-cases \
+  -H "Content-Type: application/json" \
+  -d '{
+    "unit_name": "Test Villa 101",
+    "guest_name": "Test Guest",
+    "damage_description": "Broken kettle",
+    "deposit_amount": 2000,
+    "gm_number": "971501234567",
+    "ops_supervisor_number": "971501234568",
+    "reservations_number": "971501234569",
+    "accounts_number": "971501234570"
+  }'
+
+# 8. Run cron endpoints
+curl -X POST $BASE/damage-cases/check-overdue -H "X-CRON-SECRET: your_secret"
+curl -X POST $BASE/checkout-inspections/check-due -H "X-CRON-SECRET: your_secret"
+
+# 9. Check CORS for Netlify frontend
+curl -I -H "Origin: https://ai.stayeverluxe.com" $BASE/db/health | grep access-control
+
+# 10. View dashboard
+open $BASE/dashboard-view
 ```
 
-`python-dotenv` is included in `requirements.txt`, but FastAPI does **not** auto-load `.env` — use `source .env` or a tool like [direnv](https://direnv.net/) to export the variables before running.
+---
 
-Interactive docs: http://localhost:8000/docs
+## Setup Checklist
+
+- [ ] All Replit Secrets configured (see table above)
+- [ ] `schema.sql` run once in Supabase SQL Editor
+- [ ] `task_reminder` WhatsApp template approved in Meta Business Manager
+- [ ] `damage-photos` bucket created in Supabase Storage
+- [ ] Meta webhook URL set to `https://task-bot-manager.replit.app/webhooks/whatsapp`
+- [ ] `HOSTFULLY_BASE_URL=https://api.hostfully.com/api/v3` set in Replit Secrets
+- [ ] `CRON_SECRET` set and cron jobs configured for `/damage-cases/check-overdue` and `/checkout-inspections/check-due`
+- [ ] `VITE_API_BASE_URL=https://task-bot-manager.replit.app` set in Netlify environment
+- [ ] After any code change: **redeploy** Replit Autoscale deployment
+- [ ] After any Netlify env change: **trigger redeploy** from Netlify dashboard
+
+---
+
+## Architecture
+
+- **Python 3.11** + **FastAPI** + **Uvicorn**
+- **Supabase PostgreSQL** via `supabase-py` v2 (PostgREST REST API — no direct Postgres connection needed)
+- **httpx** for async WhatsApp Cloud API and Hostfully API calls
+- **Pydantic v2** for request/response validation
+- **CORS** configured for `https://ai.stayeverluxe.com`, `localhost:5173`, `localhost:3000`
+- Singleton Supabase client initialised at startup; warning logged if secrets are missing
+
+## File Map
+
+| File | Purpose |
+|---|---|
+| `main.py` | FastAPI app, CORS, webhook routing, task/Hostfully endpoints |
+| `checkout_inspections.py` | Checkout inspection workflow + `/hostfully/sync-checkouts` |
+| `damage_cases.py` | Damage case workflow + dashboard HTML + owner summary |
+| `hostfully.py` | Hostfully API client (`fetch_properties`, `fetch_guests`, `fetch_leads`) |
+| `whatsapp.py` | WhatsApp Cloud API client |
+| `supabase_client.py` | Supabase singleton + FastAPI dependency |
+| `schema.sql` | PostgreSQL DDL — run once in Supabase SQL Editor |
+| `schemas.py` | Pydantic response schemas |
