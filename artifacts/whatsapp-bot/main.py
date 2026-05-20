@@ -666,11 +666,23 @@ async def hostfully_leads_test():
     for lead in leads[:3]:
         uid = lead.get("uid") or lead.get("id")
         prop = lead.get("propertyUid") or lead.get("propertyId")
-        checkin = lead.get("checkInDate") or lead.get("checkinDate") or lead.get("startDate")
-        checkout = lead.get("checkOutDate") or lead.get("checkoutDate") or lead.get("endDate")
-        first = lead.get("guestFirstName") or lead.get("firstName") or ""
-        last = lead.get("guestLastName") or lead.get("lastName") or ""
-        guest = f"{first} {last}".strip() or lead.get("guestName") or "—"
+        # v3: dates in ZonedDateTime / LocalDateTime; v2: checkInDate / checkOutDate
+        checkin = (
+            lead.get("checkInZonedDateTime") or lead.get("checkInLocalDateTime")
+            or lead.get("checkInDate") or lead.get("checkinDate") or lead.get("startDate")
+        )
+        checkout = (
+            lead.get("checkOutZonedDateTime") or lead.get("checkOutLocalDateTime")
+            or lead.get("checkOutDate") or lead.get("checkoutDate") or lead.get("endDate")
+        )
+        # v3: guest info is nested in guestInformation
+        gi = lead.get("guestInformation") or {}
+        first = gi.get("firstName") or lead.get("guestFirstName") or lead.get("firstName") or ""
+        last = gi.get("lastName") or lead.get("guestLastName") or lead.get("lastName") or ""
+        guest = (
+            gi.get("fullName") or f"{first} {last}".strip()
+            or lead.get("guestName") or "—"
+        )
         status = lead.get("status") or "—"
         summaries.append({
             "uid": uid,
