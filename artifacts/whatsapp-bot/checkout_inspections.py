@@ -731,7 +731,7 @@ async def sync_checkouts(debug: bool = False, sb: Client = Depends(get_supabase_
     # Paginate through ALL leads; client-side filter applied below because
     # the Hostfully v3 API ignores server-side checkOutAfter/checkOutBefore.
     try:
-        all_bookings, pages_fetched = await fetch_all_leads(api_key, agency_uid, base_url)
+        all_bookings, pages_fetched, _last_raw = await fetch_all_leads(api_key, agency_uid, base_url)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Hostfully API request failed: {exc}")
 

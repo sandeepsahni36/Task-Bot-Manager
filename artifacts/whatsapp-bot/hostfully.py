@@ -4,7 +4,11 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-PAGE_LIMIT = 100  # records per page for paginated requests
+# Hostfully v3 cursor pagination uses _limit and _paging._nextCursor.
+# Pass _limit on every request; pass _cursor on requests after the first.
+# Never pass _cursor on the first request — the properties endpoint returns a
+# 500 Internal Server Error if _cursor is present on page 1.
+CURSOR_LIMIT = 100
 
 
 def get_hostfully_config() -> tuple[str, str, str]:
@@ -27,14 +31,54 @@ def get_headers(api_key: str) -> dict:
     }
 
 
+def _extract_next_cursor(data: dict) -> str | None:
+    """
+    Extract the next-page cursor from a Hostfully v3 response.
+    Looks in: _paging._nextCursor, _paging.nextCursor, nextCursor, next_cursor.
+    Returns None if this is the last page.
+    """
+    if not isinstance(data, dict):
+        return None
+    paging = data.get("_paging") or data.get("paging") or {}
+    cursor = (
+        paging.get("_nextCursor") or paging.get("nextCursor")
+        or data.get("nextCursor") or data.get("next_cursor")
+        or data.get("_cursor")
+    )
+    return cursor or None
+
+
+def _extract_records(data, list_keys: list[str]) -> list:
+    """
+    Pull the records list out of a Hostfully v3 response dict or raw list.
+    """
+    if isinstance(data, list):
+        return data
+    for key in list_keys:
+        val = data.get(key)
+        if isinstance(val, list):
+            return val
+    return []
+
+
+def _paging_info(data: dict) -> dict:
+    """Return the raw _paging and _metadata fields for diagnostics."""
+    if not isinstance(data, dict):
+        return {}
+    return {
+        "_paging": data.get("_paging"),
+        "_metadata": data.get("_metadata"),
+    }
+
+
 # ---------------------------------------------------------------------------
-# Single-page fetchers (kept for backwards compat / internal use)
+# Single-page fetchers (kept for backwards compat)
 # ---------------------------------------------------------------------------
 
 async def fetch_properties(api_key: str, agency_uid: str, base_url: str) -> tuple:
     url = f"{base_url}/properties"
-    params = {"agencyUid": agency_uid}
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    params = {"agencyUid": agency_uid, "_limit": CURSOR_LIMIT}
+    async with httpx.AsyncClient(timeout=20.0) as client:
         response = await client.get(url, headers=get_headers(api_key), params=params)
     ct = response.headers.get("content-type", "")
     return response.status_code, response.json() if ct.startswith("application/json") else {}
@@ -57,16 +101,14 @@ async def fetch_leads(
     checkin_from: str = None,
     checkin_to: str = None,
     property_uid: str = None,
-    limit: int = PAGE_LIMIT,
+    limit: int = CURSOR_LIMIT,
 ) -> tuple:
     """
-    Fetch a single page of leads/reservations from the Hostfully v3 API.
-
-    NOTE: v3 ignores server-side date filters. Use fetch_all_leads() +
-    client-side filtering instead.
+    Fetch a single page of leads/reservations (first page only).
+    For all pages use fetch_all_leads().
     """
     url = f"{base_url}/leads"
-    params: dict = {"agencyUid": agency_uid, "limit": limit, "offset": 0}
+    params: dict = {"agencyUid": agency_uid, "_limit": limit}
 
     if checkout_from:
         params["checkOutAfter"] = checkout_from
@@ -79,9 +121,6 @@ async def fetch_leads(
     if property_uid:
         params["propertyUid"] = property_uid
 
-    safe_params = {k: v for k, v in params.items() if k != "agencyUid"}
-    logger.info("Fetching Hostfully leads: url=%s params=%s", url, safe_params)
-
     async with httpx.AsyncClient(timeout=20.0) as client:
         response = await client.get(url, headers=get_headers(api_key), params=params)
 
@@ -91,60 +130,46 @@ async def fetch_leads(
     except Exception:
         data = {}
 
-    logger.info("Hostfully leads response: status=%d", response.status_code)
+    logger.info("Hostfully leads (single page): status=%d", response.status_code)
     return response.status_code, data
 
 
 # ---------------------------------------------------------------------------
-# Paginated fetchers — always exhaust all pages
+# Cursor-paginated fetchers — exhaust all pages via _nextCursor
 # ---------------------------------------------------------------------------
-
-def _extract_list(data) -> list:
-    """Extract the records list from a Hostfully API response (list or dict)."""
-    if isinstance(data, list):
-        return data
-    for key in ("leads", "bookings", "reservations", "results", "items", "properties"):
-        if key in data and isinstance(data[key], list):
-            return data[key]
-    return []
-
 
 async def fetch_all_leads(
     api_key: str,
     agency_uid: str,
     base_url: str,
     property_uid: str = None,
-) -> tuple[list, int]:
+) -> tuple[list, int, dict]:
     """
-    Paginate through all Hostfully leads using limit/offset.
+    Paginate through ALL Hostfully leads using _limit / _nextCursor.
 
     Returns:
-        (all_leads: list, pages_fetched: int)
+        (all_leads, pages_fetched, last_page_raw_response)
 
-    Stops when a page returns fewer than PAGE_LIMIT records.
-    Client-side date filtering must be applied by the caller — the v3 API
-    ignores server-side date params.
+    - First request: no _cursor param (passing _cursor on page 1 can crash some endpoints)
+    - Subsequent requests: _cursor=<_nextCursor from previous response>
+    - Stops when _nextCursor is null/absent or page returns 0 records
     """
     url = f"{base_url}/leads"
     headers = get_headers(api_key)
     all_leads: list = []
     pages = 0
-    offset = 0
+    cursor: str | None = None
+    last_raw: dict = {}
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         while True:
-            params: dict = {
-                "agencyUid": agency_uid,
-                "limit": PAGE_LIMIT,
-                "offset": offset,
-            }
+            params: dict = {"agencyUid": agency_uid, "_limit": CURSOR_LIMIT}
+            if cursor:
+                params["_cursor"] = cursor
             if property_uid:
                 params["propertyUid"] = property_uid
 
-            logger.info(
-                "fetch_all_leads: page=%d offset=%d url=%s",
-                pages + 1, offset, url,
-            )
+            logger.info("fetch_all_leads: page=%d cursor=%s", pages + 1, cursor and cursor[:20])
             response = await client.get(url, headers=headers, params=params)
             pages += 1
 
@@ -154,69 +179,55 @@ async def fetch_all_leads(
             except Exception:
                 data = {}
 
+            last_raw = data
+
             if response.status_code != 200:
-                logger.error(
-                    "fetch_all_leads: non-200 on page %d: status=%d body=%s",
-                    pages, response.status_code, data,
-                )
-                # Return what we have so far + the error status
-                return all_leads, pages
-
-            page_records = _extract_list(data)
-            all_leads.extend(page_records)
-
-            logger.info(
-                "fetch_all_leads: page=%d got=%d total_so_far=%d",
-                pages, len(page_records), len(all_leads),
-            )
-
-            if len(page_records) < PAGE_LIMIT:
-                # Last page reached
+                logger.error("fetch_all_leads: non-200 page=%d status=%d", pages, response.status_code)
                 break
 
-            offset += PAGE_LIMIT
+            page_records = _extract_records(data, ["leads", "bookings", "reservations", "results", "items"])
+            all_leads.extend(page_records)
 
-    return all_leads, pages
+            logger.info("fetch_all_leads: page=%d got=%d total=%d", pages, len(page_records), len(all_leads))
+
+            if not page_records:
+                break
+
+            cursor = _extract_next_cursor(data)
+            if not cursor:
+                break
+
+    return all_leads, pages, last_raw
 
 
 async def fetch_all_properties(
     api_key: str,
     agency_uid: str,
     base_url: str,
-) -> tuple[list, int]:
+) -> tuple[list, int, dict]:
     """
-    Paginate through all Hostfully properties using limit/offset.
-
-    The Hostfully v3 /properties endpoint ignores the ``limit`` param and
-    always returns its own page size (≈20). We therefore:
-      - increment offset by the actual count returned each page, not PAGE_LIMIT
-      - stop when a page returns 0 records (true end)
-      - use a seen-UID set to guard against infinite loops if the API wraps around
-      - cap at MAX_PAGES as a hard safety limit
+    Paginate through ALL Hostfully properties using _limit / _nextCursor.
 
     Returns:
-        (all_properties: list, pages_fetched: int)
+        (all_properties, pages_fetched, last_page_raw_response)
+
+    IMPORTANT: Do NOT pass _cursor on the first request — the v3 properties
+    endpoint returns 500 Internal Server Error if _cursor is present on page 1.
     """
-    MAX_PAGES = 100
     url = f"{base_url}/properties"
     headers = get_headers(api_key)
     all_props: list = []
-    seen_uids: set = set()
     pages = 0
-    offset = 0
+    cursor: str | None = None
+    last_raw: dict = {}
 
     async with httpx.AsyncClient(timeout=30.0) as client:
-        while pages < MAX_PAGES:
-            params: dict = {
-                "agencyUid": agency_uid,
-                "limit": PAGE_LIMIT,
-                "offset": offset,
-            }
+        while True:
+            params: dict = {"agencyUid": agency_uid, "_limit": CURSOR_LIMIT}
+            if cursor:
+                params["_cursor"] = cursor
 
-            logger.info(
-                "fetch_all_properties: page=%d offset=%d",
-                pages + 1, offset,
-            )
+            logger.info("fetch_all_properties: page=%d cursor=%s", pages + 1, cursor and cursor[:20])
             response = await client.get(url, headers=headers, params=params)
             pages += 1
 
@@ -226,51 +237,26 @@ async def fetch_all_properties(
             except Exception:
                 data = {}
 
-            if response.status_code != 200:
-                logger.error(
-                    "fetch_all_properties: non-200 on page %d: status=%d",
-                    pages, response.status_code,
-                )
-                return all_props, pages
+            last_raw = data
 
-            page_records = _extract_list(data)
+            if response.status_code != 200:
+                logger.error("fetch_all_properties: non-200 page=%d status=%d", pages, response.status_code)
+                break
+
+            page_records = _extract_records(data, ["properties", "results", "items"])
+            all_props.extend(page_records)
+
+            logger.info("fetch_all_properties: page=%d got=%d total=%d", pages, len(page_records), len(all_props))
 
             if not page_records:
-                # Empty page = genuine end of data
                 break
 
-            # Dedup guard: if all UIDs on this page already seen, the API has
-            # wrapped around or is returning duplicates — stop to avoid looping.
-            new_records = []
-            for r in page_records:
-                uid = r.get("uid") or r.get("id")
-                if uid and uid in seen_uids:
-                    continue
-                if uid:
-                    seen_uids.add(uid)
-                new_records.append(r)
-
-            if not new_records:
-                logger.warning(
-                    "fetch_all_properties: all %d records on page %d already seen; stopping",
-                    len(page_records), pages,
-                )
+            cursor = _extract_next_cursor(data)
+            if not cursor:
                 break
 
-            all_props.extend(new_records)
-
-            logger.info(
-                "fetch_all_properties: page=%d got=%d new=%d total_so_far=%d",
-                pages, len(page_records), len(new_records), len(all_props),
-            )
-
-            # Increment by actual count returned (not PAGE_LIMIT) because the
-            # API may ignore the limit param and return a fixed page size.
-            offset += len(page_records)
-
-    return all_props, pages
+    return all_props, pages, last_raw
 
 
-# fetch_bookings is an alias for fetch_leads — the /bookings endpoint does not
-# exist in Hostfully v3; /leads is the correct reservations endpoint.
+# fetch_bookings is an alias for fetch_leads — /bookings does not exist in Hostfully v3.
 fetch_bookings = fetch_leads

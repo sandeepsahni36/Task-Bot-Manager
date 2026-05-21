@@ -603,10 +603,11 @@ async def hostfully_test():
     }
 
 
-@app.get("/hostfully/leads-test", summary="Test Hostfully leads/reservations endpoint (all pages)")
+@app.get("/hostfully/leads-test", summary="Test Hostfully leads/reservations endpoint (all pages, cursor paginated)")
 async def hostfully_leads_test():
     """
-    Fetches ALL leads via pagination and returns diagnostic information.
+    Fetches ALL leads via _limit/_nextCursor cursor pagination.
+    Returns totals, cursor field names, per-record summaries, and raw first record.
     Never exposes the API key or agencyUid.
     """
     try:
@@ -615,13 +616,16 @@ async def hostfully_leads_test():
         return {"success": False, "error": str(exc)}
 
     try:
-        all_leads, pages_fetched = await fetch_all_leads(api_key, agency_uid, base_url)
+        all_leads, pages_fetched, last_raw = await fetch_all_leads(api_key, agency_uid, base_url)
     except Exception as exc:
         logger.error("Hostfully leads-test fetch failed: %s", exc)
         return {"success": False, "error": f"Request failed: {exc}"}
 
-    if not all_leads and pages_fetched == 0:
-        return {"success": False, "error": "No leads returned and no pages fetched"}
+    # Surface the raw top-level keys and paging info for diagnostics
+    top_level_keys = list(last_raw.keys()) if isinstance(last_raw, dict) else []
+    paging_raw = last_raw.get("_paging") if isinstance(last_raw, dict) else None
+    metadata_raw = last_raw.get("_metadata") if isinstance(last_raw, dict) else None
+    cursor_fields_found = [k for k in (paging_raw or {}) if "cursor" in k.lower()]
 
     def _summarise(lead: dict) -> dict:
         uid = lead.get("uid") or lead.get("id")
@@ -647,7 +651,7 @@ async def hostfully_leads_test():
             "status": lead.get("status") or "—",
         }
 
-    # Checkouts on 2026-05-21 Dubai time (UTC+4) — checkout date starts with that date
+    # Checkouts on 2026-05-21 Dubai time (UTC+4) — date starts with that string
     TARGET_DATE = "2026-05-21"
     may_21_checkouts = []
     for lead in all_leads:
@@ -664,21 +668,22 @@ async def hostfully_leads_test():
     raw_first: dict = {}
     if all_leads:
         raw_first = dict(all_leads[0])
-        for sensitive_key in ("agencyUid", "externalBookingId"):
-            if sensitive_key in raw_first:
-                raw_first[sensitive_key] = "<redacted>"
+        for k in ("agencyUid", "externalBookingId"):
+            if k in raw_first:
+                raw_first[k] = "<redacted>"
 
     field_names = list(all_leads[0].keys()) if all_leads else []
 
-    logger.info(
-        "Hostfully leads-test: total=%d pages=%d may_21=%d",
-        len(all_leads), pages_fetched, len(may_21_checkouts),
-    )
+    logger.info("Hostfully leads-test: total=%d pages=%d", len(all_leads), pages_fetched)
     return {
         "success": True,
         "total_records_fetched": len(all_leads),
         "pages_fetched": pages_fetched,
         "records_per_page": 100,
+        "response_top_level_keys": top_level_keys,
+        "paging_info": paging_raw,
+        "metadata_info": metadata_raw,
+        "cursor_fields_found": cursor_fields_found,
         "first_3_summaries": [_summarise(l) for l in all_leads[:3]],
         "may_21_checkouts": may_21_checkouts,
         "available_field_names": field_names,
@@ -686,7 +691,7 @@ async def hostfully_leads_test():
     }
 
 
-@app.get("/hostfully/properties", summary="List all Hostfully properties (paginated)")
+@app.get("/hostfully/properties", summary="List all Hostfully properties (cursor paginated)")
 async def hostfully_properties():
     try:
         api_key, agency_uid, base_url = get_hostfully_config()
@@ -694,7 +699,7 @@ async def hostfully_properties():
         return {"success": False, "error": str(exc)}
 
     try:
-        all_props, pages_fetched = await fetch_all_properties(api_key, agency_uid, base_url)
+        all_props, pages_fetched, _last_raw = await fetch_all_properties(api_key, agency_uid, base_url)
     except Exception as exc:
         logger.error("Hostfully properties fetch failed: %s", exc)
         return {"success": False, "error": f"Request failed: {exc}"}
@@ -709,15 +714,142 @@ async def hostfully_properties():
             "active": p.get("active") or p.get("status"),
         })
 
-    logger.info(
-        "Hostfully properties fetched: %d properties in %d pages",
-        len(results), pages_fetched,
-    )
+    note = None
+    if len(results) <= 20:
+        note = (
+            f"Hostfully returned only {len(results)} properties with this API key/agency UID. "
+            "This may be a property-level permission restriction — check active/published status in Hostfully."
+        )
+
+    logger.info("Hostfully properties fetched: %d in %d pages", len(results), pages_fetched)
     return {
         "success": True,
         "count": len(results),
         "pages_fetched": pages_fetched,
+        "note": note,
         "properties": results,
+    }
+
+
+@app.get("/hostfully/access-diagnostics", summary="Full Hostfully API access diagnostics")
+async def hostfully_access_diagnostics():
+    """
+    Runs paginated fetches for both properties and leads, then returns a
+    comprehensive diagnostic report — cursor fields, top-level keys, totals,
+    duplicate-page detection, and sample records. Useful for verifying API
+    key permissions and understanding the response envelope.
+    """
+    try:
+        api_key, agency_uid, base_url = get_hostfully_config()
+    except ValueError as exc:
+        return {"success": False, "error": str(exc)}
+
+    safe_agency = agency_uid[:8] + "…" if agency_uid else "?"
+
+    # --- Properties ---
+    props_error = None
+    all_props: list = []
+    props_pages = 0
+    props_top_keys: list = []
+    props_paging: dict = {}
+    props_cursor_fields: list = []
+    props_duplicate_detected = False
+
+    try:
+        all_props, props_pages, props_last_raw = await fetch_all_properties(api_key, agency_uid, base_url)
+        props_top_keys = list(props_last_raw.keys()) if isinstance(props_last_raw, dict) else []
+        props_paging = props_last_raw.get("_paging") if isinstance(props_last_raw, dict) else {}
+        props_cursor_fields = [k for k in (props_paging or {}) if "cursor" in k.lower()]
+    except Exception as exc:
+        props_error = str(exc)
+
+    # --- Leads ---
+    leads_error = None
+    all_leads: list = []
+    leads_pages = 0
+    leads_top_keys: list = []
+    leads_paging: dict = {}
+    leads_cursor_fields: list = []
+    leads_duplicate_detected = False
+
+    try:
+        all_leads, leads_pages, leads_last_raw = await fetch_all_leads(api_key, agency_uid, base_url)
+        leads_top_keys = list(leads_last_raw.keys()) if isinstance(leads_last_raw, dict) else []
+        leads_paging = leads_last_raw.get("_paging") if isinstance(leads_last_raw, dict) else {}
+        leads_cursor_fields = [k for k in (leads_paging or {}) if "cursor" in k.lower()]
+        # Duplicate detection: if any uid appears more than once across all pages
+        uid_counts: dict = {}
+        for lead in all_leads:
+            uid = lead.get("uid") or lead.get("id")
+            if uid:
+                uid_counts[uid] = uid_counts.get(uid, 0) + 1
+        leads_duplicate_detected = any(v > 1 for v in uid_counts.values())
+    except Exception as exc:
+        leads_error = str(exc)
+
+    # Duplicate detection for properties
+    prop_uid_counts: dict = {}
+    for p in all_props:
+        uid = p.get("uid") or p.get("id")
+        if uid:
+            prop_uid_counts[uid] = prop_uid_counts.get(uid, 0) + 1
+    props_duplicate_detected = any(v > 1 for v in prop_uid_counts.values())
+
+    def _lead_summary(lead: dict) -> dict:
+        gi = lead.get("guestInformation") or {}
+        first = gi.get("firstName") or ""
+        last = gi.get("lastName") or ""
+        return {
+            "uid": lead.get("uid"),
+            "property_uid": lead.get("propertyUid"),
+            "guest": f"{first} {last}".strip() or "—",
+            "check_out": lead.get("checkOutZonedDateTime") or lead.get("checkOutLocalDateTime"),
+            "status": lead.get("status"),
+        }
+
+    props_note = None
+    if len(all_props) <= 20 and not props_error:
+        props_note = (
+            f"Hostfully returned only {len(all_props)} properties with this API key/agency UID. "
+            "This may be a property-level permission restriction — check active/published status in Hostfully."
+        )
+
+    logger.info(
+        "access-diagnostics: props=%d props_pages=%d leads=%d leads_pages=%d",
+        len(all_props), props_pages, len(all_leads), leads_pages,
+    )
+    return {
+        "success": True,
+        "agency_uid_prefix": safe_agency,
+        "base_url": base_url,
+        "raw_urls_called": {
+            "properties": f"{base_url}/properties?agencyUid=<hidden>&_limit=100",
+            "leads": f"{base_url}/leads?agencyUid=<hidden>&_limit=100",
+        },
+        "properties": {
+            "count": len(all_props),
+            "pages_fetched": props_pages,
+            "duplicate_pages_detected": props_duplicate_detected,
+            "response_top_level_keys": props_top_keys,
+            "paging_info": props_paging,
+            "cursor_fields_found": props_cursor_fields,
+            "first_5_names": [
+                (p.get("name") or p.get("title") or p.get("propertyName") or "?")
+                for p in all_props[:5]
+            ],
+            "note": props_note,
+            "error": props_error,
+        },
+        "leads": {
+            "count": len(all_leads),
+            "pages_fetched": leads_pages,
+            "duplicate_pages_detected": leads_duplicate_detected,
+            "response_top_level_keys": leads_top_keys,
+            "paging_info": leads_paging,
+            "cursor_fields_found": leads_cursor_fields,
+            "first_5_summaries": [_lead_summary(l) for l in all_leads[:5]],
+            "error": leads_error,
+        },
     }
 
 
