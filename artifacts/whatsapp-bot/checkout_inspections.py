@@ -3,12 +3,13 @@ import os
 from datetime import datetime, timedelta
 from typing import List, Optional
 
+import re
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from supabase import Client
 
-from hostfully import get_hostfully_config, fetch_leads, fetch_all_leads
+from hostfully import get_hostfully_config, fetch_leads, fetch_all_leads, fetch_all_properties
 from supabase_client import get_supabase_dep
 from whatsapp import send_text_message
 
@@ -459,6 +460,85 @@ async def check_due_checkouts(request: Request, sb: Client = Depends(get_supabas
 
 
 # ---------------------------------------------------------------------------
+# POST /checkout-inspections/repair
+# ---------------------------------------------------------------------------
+
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+
+@router.post("/repair", summary="Fix stored literal env-var name and UUID unit_names")
+async def repair_inspections(sb: Client = Depends(get_supabase_dep)):
+    """
+    1. Replace assigned_ops_number = 'DEFAULT_OPS_WHATSAPP_NUMBER' with the
+       actual env var value.
+    2. Replace unit_name values that look like UUIDs with the real Hostfully
+       property name where possible.
+    """
+    real_ops = os.getenv("DEFAULT_OPS_WHATSAPP_NUMBER")
+
+    # Build property map from Hostfully
+    prop_map: dict[str, str] = {}
+    prop_map_error: str | None = None
+    try:
+        api_key, agency_uid, base_url = get_hostfully_config()
+        _all_props, _, _ = await fetch_all_properties(api_key, agency_uid, base_url)
+        prop_map = {
+            (p.get("uid") or p.get("id")): (
+                p.get("name") or p.get("title") or p.get("propertyName") or ""
+            )
+            for p in _all_props
+            if (p.get("uid") or p.get("id"))
+        }
+    except Exception as exc:
+        prop_map_error = str(exc)
+        logger.warning("repair_inspections: fetch_all_properties failed: %s", exc)
+
+    all_rows = sb.table("checkout_inspections").select("id, assigned_ops_number, unit_name, hostfully_property_uid").execute().data
+
+    updated_count = 0
+    errors: list[str] = []
+
+    for row in all_rows:
+        patch: dict = {}
+
+        # Fix literal env-var name stored as value
+        if row.get("assigned_ops_number") == "DEFAULT_OPS_WHATSAPP_NUMBER":
+            if real_ops:
+                patch["assigned_ops_number"] = real_ops
+            else:
+                errors.append(f"Row {row['id']}: DEFAULT_OPS_WHATSAPP_NUMBER env var is not set — cannot repair assigned_ops_number")
+
+        # Fix UUID unit_name
+        unit_name = row.get("unit_name") or ""
+        if _UUID_RE.match(unit_name.strip()):
+            prop_uid = row.get("hostfully_property_uid") or unit_name.strip()
+            mapped = prop_map.get(prop_uid, "")
+            if mapped:
+                patch["unit_name"] = mapped
+            else:
+                errors.append(f"Row {row['id']}: unit_name is UUID '{unit_name}' but no property name found in Hostfully map")
+
+        if patch:
+            patch["updated_at"] = _now_utc()
+            try:
+                sb.table("checkout_inspections").update(patch).eq("id", row["id"]).execute()
+                updated_count += 1
+            except Exception as exc:
+                errors.append(f"Row {row['id']}: DB update failed — {exc}")
+
+    return {
+        "updated_count": updated_count,
+        "total_rows_scanned": len(all_rows),
+        "prop_map_size": len(prop_map),
+        "prop_map_error": prop_map_error,
+        "errors": errors,
+    }
+
+
+# ---------------------------------------------------------------------------
 # GET /checkout-inspections/{insp_id}
 # ---------------------------------------------------------------------------
 
@@ -712,6 +792,54 @@ async def damage_found(
 
 
 # ---------------------------------------------------------------------------
+# POST /checkout-inspections/{id}/resend-message
+# ---------------------------------------------------------------------------
+
+@router.post("/{insp_id}/resend-message", summary="Resend the checkout verification WhatsApp message for an inspection")
+async def resend_checkout_message(insp_id: int, sb: Client = Depends(get_supabase_dep)):
+    insp = _get_inspection_or_404(sb, insp_id)
+
+    ops_number = insp.get("assigned_ops_number")
+    if not ops_number:
+        raise HTTPException(status_code=400, detail="assigned_ops_number is not set on this inspection")
+    if ops_number == "DEFAULT_OPS_WHATSAPP_NUMBER":
+        raise HTTPException(
+            status_code=400,
+            detail="assigned_ops_number is still set to the literal string 'DEFAULT_OPS_WHATSAPP_NUMBER' — run /checkout-inspections/repair first",
+        )
+
+    checkout_str = (
+        _parse_dt(insp.get("scheduled_checkout_at")).strftime("%d %b %Y %H:%M UTC")
+        if _parse_dt(insp.get("scheduled_checkout_at")) else "—"
+    )
+
+    msg = (
+        f"*Checkout Reminder* — Unit: {insp['unit_name']}\n"
+        f"Guest: {insp.get('guest_name') or '—'}\n"
+        f"Scheduled checkout: {checkout_str}\n\n"
+        f"Reply 1 Guest checked out, inspect unit\n"
+        f"Reply 2 Guest still inside / late checkout\n"
+        f"Reply 3 Issue"
+    )
+
+    try:
+        result = await send_text_message(ops_number, msg)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"WhatsApp send failed: {exc}")
+
+    _update_inspection(sb, insp_id, {"last_message_sent_at": _now_utc()})
+    logger.info("Resent checkout message: inspection=%d ops=%s", insp_id, ops_number)
+
+    return {
+        "inspection_id": insp_id,
+        "unit_name": insp["unit_name"],
+        "ops_number": ops_number,
+        "last_message_sent_at": _now_utc(),
+        "whatsapp_response": result,
+    }
+
+
+# ---------------------------------------------------------------------------
 # POST /hostfully/sync-checkouts
 # ---------------------------------------------------------------------------
 
@@ -724,7 +852,10 @@ async def sync_checkouts(debug: bool = False, sb: Client = Depends(get_supabase_
 
     ops_number = os.getenv("DEFAULT_OPS_WHATSAPP_NUMBER")
     if not ops_number:
-        raise HTTPException(status_code=500, detail="DEFAULT_OPS_WHATSAPP_NUMBER is not set")
+        return JSONResponse(
+            status_code=400,
+            content={"error": "DEFAULT_OPS_WHATSAPP_NUMBER is not configured"},
+        )
 
     now = datetime.utcnow()
 
@@ -734,6 +865,20 @@ async def sync_checkouts(debug: bool = False, sb: Client = Depends(get_supabase_
         all_bookings, pages_fetched, _last_raw = await fetch_all_leads(api_key, agency_uid, base_url)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Hostfully API request failed: {exc}")
+
+    # Build property UID → name map (Hostfully v3 leads do not include property names)
+    try:
+        _all_props, _, _ = await fetch_all_properties(api_key, agency_uid, base_url)
+        prop_map: dict[str, str] = {
+            (p.get("uid") or p.get("id")): (
+                p.get("name") or p.get("title") or p.get("propertyName") or ""
+            )
+            for p in _all_props
+            if (p.get("uid") or p.get("id"))
+        }
+    except Exception as exc:
+        logger.warning("fetch_all_properties failed in sync_checkouts: %s — unit names will use UIDs", exc)
+        prop_map = {}
 
     # Client-side date filtering: today and tomorrow (naive UTC midnight boundaries)
     window_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -786,6 +931,10 @@ async def sync_checkouts(debug: bool = False, sb: Client = Depends(get_supabase_
 
     for booking in checkouts:
         f = _extract_booking_fields(booking)
+        # Override unit_name with Hostfully property name (v3 leads don't include it)
+        _mapped_name = prop_map.get(f["property_uid"] or "")
+        if _mapped_name:
+            f = {**f, "unit_name": _mapped_name}
         reservation_uid = f["reservation_uid"]
         if not reservation_uid:
             errors.append("Booking missing UID — skipped")
@@ -843,6 +992,9 @@ async def sync_checkouts(debug: bool = False, sb: Client = Depends(get_supabase_
 
         if rebooking:
             rb_fields = _extract_booking_fields(rebooking)
+            _rb_mapped = prop_map.get(rb_fields["property_uid"] or "")
+            if _rb_mapped:
+                rb_fields = {**rb_fields, "unit_name": _rb_mapped}
             new_checkout_dt = _parse_date_flexible(rb_fields["checkout_str"])
             new_uid = rb_fields["reservation_uid"]
 
