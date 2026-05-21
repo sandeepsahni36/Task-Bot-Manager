@@ -8,7 +8,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from supabase import Client
 
-from hostfully import get_hostfully_config, fetch_leads
+from hostfully import get_hostfully_config, fetch_leads, fetch_all_leads
 from supabase_client import get_supabase_dep
 from whatsapp import send_text_message
 
@@ -716,7 +716,7 @@ async def damage_found(
 # ---------------------------------------------------------------------------
 
 @hostfully_checkout_router.post("/sync-checkouts", summary="Sync Hostfully checkouts, detect rebookings, send ops messages")
-async def sync_checkouts(sb: Client = Depends(get_supabase_dep)):
+async def sync_checkouts(debug: bool = False, sb: Client = Depends(get_supabase_dep)):
     try:
         api_key, agency_uid, base_url = get_hostfully_config()
     except ValueError as exc:
@@ -727,30 +727,22 @@ async def sync_checkouts(sb: Client = Depends(get_supabase_dep)):
         raise HTTPException(status_code=500, detail="DEFAULT_OPS_WHATSAPP_NUMBER is not set")
 
     now = datetime.utcnow()
-    today = now.date()
-    tomorrow = today + timedelta(days=1)
 
-    # Fetch leads/reservations with checkouts for today and tomorrow
-    status_code, bookings_data = await fetch_leads(
-        api_key, agency_uid, base_url,
-        checkout_from=today.isoformat(),
-        checkout_to=tomorrow.isoformat(),
-    )
-    if status_code != 200:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Hostfully API returned {status_code}: {bookings_data}",
-        )
+    # Paginate through ALL leads; client-side filter applied below because
+    # the Hostfully v3 API ignores server-side checkOutAfter/checkOutBefore.
+    try:
+        all_bookings, pages_fetched = await fetch_all_leads(api_key, agency_uid, base_url)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Hostfully API request failed: {exc}")
 
-    all_bookings = _extract_bookings_list(bookings_data)
+    # Client-side date filtering: today and tomorrow (naive UTC midnight boundaries)
+    window_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    window_end = (now + timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
 
-    # Client-side date filtering: the Hostfully v3 /leads endpoint ignores
-    # checkOutAfter/checkOutBefore params and returns all leads. Filter here.
-    now_dt = now
-    window_start = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
-    window_end = (now_dt + timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
+    leads_with_checkout_dates: list[dict] = []
+    checkouts: list[dict] = []
+    debug_checkout_leads: list[dict] = []
 
-    checkouts = []
     for b in all_bookings:
         if (b.get("status") or "").lower() in CANCELLED_BOOKING_STATUSES:
             continue
@@ -758,14 +750,31 @@ async def sync_checkouts(sb: Client = Depends(get_supabase_dep)):
         co_dt = _parse_date_flexible(f_temp["checkout_str"])
         if co_dt is None:
             continue
-        # Strip timezone offset if present (already converted to naive UTC-ish local)
+
+        leads_with_checkout_dates.append(b)
         co_dt_naive = co_dt.replace(tzinfo=None) if hasattr(co_dt, 'tzinfo') and co_dt.tzinfo else co_dt
-        if window_start <= co_dt_naive < window_end:
+
+        in_window = window_start <= co_dt_naive < window_end
+        if in_window:
             checkouts.append(b)
 
+        if debug:
+            gi = b.get("guestInformation") or {}
+            first = gi.get("firstName") or ""
+            last = gi.get("lastName") or ""
+            debug_checkout_leads.append({
+                "uid": f_temp["reservation_uid"],
+                "propertyUid": f_temp["property_uid"],
+                "guest_name": f"{first} {last}".strip() or "—",
+                "checkOutZonedDateTime": f_temp["checkout_str"],
+                "checkout_dt_naive": co_dt_naive.isoformat() if co_dt_naive else None,
+                "included": in_window,
+                "reason": "in window" if in_window else f"outside {window_start.date()}–{window_end.date()}",
+            })
+
     logger.info(
-        "sync_checkouts: %d total leads from Hostfully, %d with checkout today/tomorrow",
-        len(all_bookings), len(checkouts),
+        "sync_checkouts: pages=%d total_leads=%d with_checkout=%d today_or_tomorrow=%d",
+        pages_fetched, len(all_bookings), len(leads_with_checkout_dates), len(checkouts),
     )
 
     created_count = 0
@@ -902,7 +911,7 @@ async def sync_checkouts(sb: Client = Depends(get_supabase_dep)):
             except Exception as exc:
                 errors.append(f"WhatsApp failed for {reservation_uid}: {exc}")
 
-    return {
+    result = {
         "created_count":                    created_count,
         "updated_count":                    updated_count,
         "rebooked_extension_detected_count": rebooked_count,
@@ -910,3 +919,14 @@ async def sync_checkouts(sb: Client = Depends(get_supabase_dep)):
         "skipped_count":                    skipped_count,
         "errors":                           errors,
     }
+
+    if debug:
+        result["debug"] = {
+            "total_leads_fetched":        len(all_bookings),
+            "pages_fetched":              pages_fetched,
+            "leads_with_checkout_dates":  len(leads_with_checkout_dates),
+            "checkouts_today_or_tomorrow": len(checkouts),
+            "checkout_leads":             debug_checkout_leads,
+        }
+
+    return result

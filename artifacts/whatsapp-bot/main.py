@@ -11,7 +11,11 @@ from supabase import Client
 
 from schemas import TaskOut, WhatsAppMessageOut, SendTestTaskResponse
 from whatsapp import send_template_message, send_text_message
-from hostfully import get_hostfully_config, fetch_properties, fetch_guests, fetch_leads
+from hostfully import (
+    get_hostfully_config,
+    fetch_properties, fetch_guests, fetch_leads,
+    fetch_all_leads, fetch_all_properties,
+)
 from damage_cases import router as damage_router, owner_router
 from checkout_inspections import router as checkout_router, hostfully_checkout_router
 from supabase_client import get_supabase_client, get_supabase_dep
@@ -599,74 +603,29 @@ async def hostfully_test():
     }
 
 
-@app.get("/hostfully/leads-test", summary="Test Hostfully leads/reservations endpoint")
+@app.get("/hostfully/leads-test", summary="Test Hostfully leads/reservations endpoint (all pages)")
 async def hostfully_leads_test():
     """
-    Verifies that the correct Hostfully leads/reservations endpoint is reachable.
-    Uses /leads (not /bookings). Returns the first 3 records summarised and
-    the available field names from the first record. Never exposes the API key.
+    Fetches ALL leads via pagination and returns diagnostic information.
+    Never exposes the API key or agencyUid.
     """
     try:
         api_key, agency_uid, base_url = get_hostfully_config()
     except ValueError as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        return {"success": False, "error": str(exc)}
 
-    import httpx
-    url = f"{base_url}/leads"
-    params = {"agencyUid": agency_uid, "limit": 3, "offset": 0}
-    safe_url = f"{url}?limit=3&offset=0&agencyUid=<hidden>"
-
-    logger.info("Hostfully leads-test: calling %s", safe_url)
-
-    headers = {
-        "X-HOSTFULLY-APIKEY": api_key,
-        "Accept": "application/json",
-    }
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.get(url, headers=headers, params=params)
+        all_leads, pages_fetched = await fetch_all_leads(api_key, agency_uid, base_url)
     except Exception as exc:
-        logger.error("Hostfully leads-test request failed: %s", exc)
-        raise HTTPException(status_code=502, detail=f"Request failed: {exc}")
+        logger.error("Hostfully leads-test fetch failed: %s", exc)
+        return {"success": False, "error": f"Request failed: {exc}"}
 
-    ct = response.headers.get("content-type", "")
-    try:
-        data = response.json() if ct.startswith("application/json") else {}
-    except Exception:
-        data = {}
+    if not all_leads and pages_fetched == 0:
+        return {"success": False, "error": "No leads returned and no pages fetched"}
 
-    success = response.status_code == 200
-
-    if not success:
-        logger.warning("Hostfully leads-test failed: status=%d body=%s", response.status_code, data)
-        return {
-            "success": False,
-            "status_code": response.status_code,
-            "raw_url_called": safe_url,
-            "error_body": data,
-        }
-
-    # Extract leads list from various possible response shapes
-    leads = []
-    if isinstance(data, list):
-        leads = data
-    else:
-        for key in ("leads", "bookings", "reservations", "results", "items"):
-            if key in data and isinstance(data[key], list):
-                leads = data[key]
-                break
-
-    total = (
-        data.get("total") or data.get("count") or data.get("totalCount")
-        if isinstance(data, dict) else None
-    )
-
-    field_names = list(leads[0].keys()) if leads else []
-    summaries = []
-    for lead in leads[:3]:
+    def _summarise(lead: dict) -> dict:
         uid = lead.get("uid") or lead.get("id")
         prop = lead.get("propertyUid") or lead.get("propertyId")
-        # v3: dates in ZonedDateTime / LocalDateTime; v2: checkInDate / checkOutDate
         checkin = (
             lead.get("checkInZonedDateTime") or lead.get("checkInLocalDateTime")
             or lead.get("checkInDate") or lead.get("checkinDate") or lead.get("startDate")
@@ -675,65 +634,73 @@ async def hostfully_leads_test():
             lead.get("checkOutZonedDateTime") or lead.get("checkOutLocalDateTime")
             or lead.get("checkOutDate") or lead.get("checkoutDate") or lead.get("endDate")
         )
-        # v3: guest info is nested in guestInformation
         gi = lead.get("guestInformation") or {}
         first = gi.get("firstName") or lead.get("guestFirstName") or lead.get("firstName") or ""
         last = gi.get("lastName") or lead.get("guestLastName") or lead.get("lastName") or ""
-        guest = (
-            gi.get("fullName") or f"{first} {last}".strip()
-            or lead.get("guestName") or "—"
-        )
-        status = lead.get("status") or "—"
-        summaries.append({
+        guest = gi.get("fullName") or f"{first} {last}".strip() or lead.get("guestName") or "—"
+        return {
             "uid": uid,
             "property_uid": prop,
             "guest": guest,
             "check_in": checkin,
             "check_out": checkout,
-            "status": status,
-        })
+            "status": lead.get("status") or "—",
+        }
 
-    # Redact sensitive fields from the raw first record before returning
-    raw_first = {}
-    if leads:
-        raw_first = dict(leads[0])
+    # Checkouts on 2026-05-21 Dubai time (UTC+4) — checkout date starts with that date
+    TARGET_DATE = "2026-05-21"
+    may_21_checkouts = []
+    for lead in all_leads:
+        if (lead.get("status") or "").upper() in ("CANCELLED", "DECLINED", "EXPIRED"):
+            continue
+        co = (
+            lead.get("checkOutZonedDateTime") or lead.get("checkOutLocalDateTime")
+            or lead.get("checkOutDate") or ""
+        )
+        if co.startswith(TARGET_DATE):
+            may_21_checkouts.append(_summarise(lead))
+
+    # Redact sensitive fields from first raw record
+    raw_first: dict = {}
+    if all_leads:
+        raw_first = dict(all_leads[0])
         for sensitive_key in ("agencyUid", "externalBookingId"):
             if sensitive_key in raw_first:
                 raw_first[sensitive_key] = "<redacted>"
 
+    field_names = list(all_leads[0].keys()) if all_leads else []
+
     logger.info(
-        "Hostfully leads-test success: %d leads returned, total=%s",
-        len(leads), total,
+        "Hostfully leads-test: total=%d pages=%d may_21=%d",
+        len(all_leads), pages_fetched, len(may_21_checkouts),
     )
     return {
         "success": True,
-        "status_code": response.status_code,
-        "raw_url_called": safe_url,
-        "total_records": total,
-        "records_in_response": len(leads),
-        "first_3_summaries": summaries,
+        "total_records_fetched": len(all_leads),
+        "pages_fetched": pages_fetched,
+        "records_per_page": 100,
+        "first_3_summaries": [_summarise(l) for l in all_leads[:3]],
+        "may_21_checkouts": may_21_checkouts,
         "available_field_names": field_names,
         "first_record_raw": raw_first,
     }
 
 
-@app.get("/hostfully/properties", summary="List all Hostfully properties")
+@app.get("/hostfully/properties", summary="List all Hostfully properties (paginated)")
 async def hostfully_properties():
     try:
         api_key, agency_uid, base_url = get_hostfully_config()
     except ValueError as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        return {"success": False, "error": str(exc)}
 
-    status_code, data = await fetch_properties(api_key, agency_uid, base_url)
-    if status_code != 200:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Hostfully API returned {status_code}: {data}",
-        )
+    try:
+        all_props, pages_fetched = await fetch_all_properties(api_key, agency_uid, base_url)
+    except Exception as exc:
+        logger.error("Hostfully properties fetch failed: %s", exc)
+        return {"success": False, "error": f"Request failed: {exc}"}
 
-    items = data if isinstance(data, list) else data.get("properties", data.get("results", []))
     results = []
-    for p in items:
+    for p in all_props:
         results.append({
             "uid": p.get("uid") or p.get("id"),
             "name": p.get("name") or p.get("title") or p.get("propertyName"),
@@ -742,8 +709,16 @@ async def hostfully_properties():
             "active": p.get("active") or p.get("status"),
         })
 
-    logger.info("Hostfully properties fetched: %d properties", len(results))
-    return {"count": len(results), "properties": results}
+    logger.info(
+        "Hostfully properties fetched: %d properties in %d pages",
+        len(results), pages_fetched,
+    )
+    return {
+        "success": True,
+        "count": len(results),
+        "pages_fetched": pages_fetched,
+        "properties": results,
+    }
 
 
 @app.get("/hostfully/guests", summary="List first 10 Hostfully guests")
